@@ -2,6 +2,7 @@
 /**
  * ds-map CLI: dsmap run -- <harness command>
  * Поднимает сайдкар, запускает харнес, открывает окно справа.
+ * dsmap doctor — проверка состояния.
  */
 
 import { DaemonServer } from './daemon/server.js'
@@ -10,6 +11,7 @@ import { SessionTailer } from './daemon/session.js'
 import { spawn } from 'node:child_process'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import * as fs from 'node:fs'
 
 const bus = new EventBus()
 const server = new DaemonServer(bus)
@@ -20,14 +22,21 @@ let electronProc: ReturnType<typeof spawn> | null = null
 
 async function main() {
   const args = process.argv.slice(2)
-  const runIdx = args.indexOf('run')
-  if (runIdx === -1) {
+  const cmd = args[0]
+
+  if (cmd === 'doctor') {
+    runDoctor()
+    return
+  }
+
+  if (cmd !== 'run') {
     console.error('Использование: dsmap run -- <команда харнеса>')
+    console.error('       dsmap doctor')
     process.exit(1)
   }
 
-  const dashIdx = args.indexOf('--', runIdx + 1)
-  const harnessArgs = dashIdx === -1 ? args.slice(runIdx + 1) : args.slice(dashIdx + 1)
+  const dashIdx = args.indexOf('--', 1)
+  const harnessArgs = dashIdx === -1 ? args.slice(1) : args.slice(dashIdx + 1)
   const harnessCmd = harnessArgs[0]
   const harnessCmdArgs = harnessArgs.slice(1)
 
@@ -67,6 +76,26 @@ async function main() {
 
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
+}
+
+function runDoctor(): void {
+  const TOKEN_PATH = path.join(os.homedir(), '.dsh', 'dsmap-token.txt')
+  const PORT_PATH = path.join(os.homedir(), '.dsh', 'dsmap-port.txt')
+  const SESSIONS_ROOT = path.join(os.homedir(), '.dsh', 'sessions')
+
+  let ok = true
+  function check(name: string, passed: boolean, detail?: string): void {
+    console.log(`${passed ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`)
+    if (!passed) ok = false
+  }
+
+  check('Токен сайдкара', fs.existsSync(TOKEN_PATH), TOKEN_PATH)
+  check('Порт сайдкара', fs.existsSync(PORT_PATH), PORT_PATH)
+  check('Каталог сессий DSH', fs.existsSync(SESSIONS_ROOT), SESSIONS_ROOT)
+  check('Зависимости установлены', fs.existsSync(path.join(process.cwd(), 'node_modules')))
+  check('Проект собран', fs.existsSync(path.join(process.cwd(), 'dist')), 'запустите pnpm build')
+
+  if (!ok) process.exit(1)
 }
 
 function launchElectron(port: number, token: string, harnessPid?: number): void {

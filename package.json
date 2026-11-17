@@ -13,7 +13,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test",
     "test": "vitest run",
-    "doctor": "node dist/doctor.js"
+    "doctor": "node dist/doctor.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -28,5 +30,24 @@
     "vitest": "^2.0.0",
     "ws": "^8.17.0"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "build": {
+    "appId": "dev.dsmap.app",
+    "productName": "ds-map",
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Development"
+    }
+  }
 }
