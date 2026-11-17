@@ -1,75 +1,62 @@
-# DISCOVERY — ds-map подключение к харнесу DeepSeek
+# M1 — разведка интеграции ds-map с DeepSeek Harness
 
-## 1. Как запускается Харнес
+Дата проверок: 17 ноября 2026. Цель — выбрать источник событий, прежде чем проектировать подключение. Секреты, содержимое сообщений, файлов и команд в этот отчёт не включены.
 
-Команда: `dsh web` — профиль `web` поднимает Web GUI на `http://127.0.0.1:3080`.
-- TUI? Нет, это веб-приложение.
-- Версия: `@deepseek-ai/dsh` 0.2.2-rc.1.
-- Профили лежат в `C:\Users\user\.dsh\profiles\` (web, headless, acp).
-- Сессии пишутся в `C:\Users\user\.dsh\sessions\--<cwd>--\<session-id>\session.v4.jsonl` — **не сжатый JSONL**, по одной строке на событие.
+## Результаты
 
-## 2. Хуки, плагины, конфиг
+### Версия, команда, GUI и среда
 
-Есть плагины (cordis patch layers):
-- `dsh-git-rollback` — чекпоинты git
-- `skill-filesystem` + `tool-skill` — скиллы (включены через `~/.dsh/cordis.patch.yml`)
-- `mcp-agent-bus`, `mcp-playwright`, `mcp-context7` — MCP клиенты
-- `session-persistence-jsonl` — хранение сессий в JSONL
+- Установленный CLI: `dsh --version` → `0.2.2-rc.1`.
+- `dsh --help` показывает профильный запуск `dsh web` / `dsh --profile <name>`, многократный `--patch <path>`, команды выгрузки конфигурации и управления плагинами (`dsh plugin --profile <name> ...`). Отдельного флага base URL API в launcher-справке нет.
+- Профиль Web GUI доступен на `http://127.0.0.1:3080`. Проверка через браузер без пользовательских credentials: HTTP `401 Unauthorized`, поэтому успешную авторизованную загрузку GUI не утверждаем. Порт слушает только `127.0.0.1`.
+- ОС: Windows NT `10.0.26200.0`; оболочка проверки — Windows PowerShell `5.1.26100.9818`; Node.js `v24.20.0`; pnpm `12.16.1`.
+- Это Web GUI, не TUI. В списке процессов наблюдались `Code` и `OpenConsole`; определить отдельный терминал, из которого пользователь обычно запускает приложение, не удалось. Не выводим конкретный терминальный эмулятор из этого наблюдения.
+- DSH установлен из npm в `C:\Users\user\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh`. Его активная сессия и хранилище доступны на этой машине; пользовательские конфигурации и значения credentials не раскрывались.
 
-Конфиг: `~/.dsh/cordis.patch.yml` (машинный слой) + `~/.dsh/profiles/web/cordis.patch.yml` (слой профиля).
+### Нативные события и расширения
 
-Переменная `base_url` для API: **не настраивается через CLI флаг**. LLM-провайдер настраивается в `cordis.patch.yml` (блок `llm-pi-ai`, провайдер `kilofree` по умолчанию на `http://127.0.0.1:8082/v1`, сейчас сломан — используется `coarena`).
+Проверены декларации установленных пакетов `@deepseek-ai/dsh-session`, `@deepseek-ai/dsh-agent` и `@deepseek-ai/dsh-tools` и документация Host-плагина:
 
-Вариант B (прокси перед API через `base_url`) — **не применим напрямую**: `base_url` неExposeется как переменная окружения или флаг CLI для отдельного сеанса.
+- Host-плагин внешнего профиля может подписывать обработчики Cordis-событий в `apply(ctx, config)` (`dsh-agent-preset/skills/cordis-plugin-development/references/host-plugin.md`, раздел Host plugin; пример регистрации и очистки обработчика).
+- `ctx.on('session/created', ...)`, `session/disposed` и `session/event` существуют. `session/event` — post-commit feed; обработчики выполняются fire-and-forget и отфильтрованы по scope агента. В persistent event map имеются `system/message`, `assistant/message` (включая stream/usage, если они записаны), `assistant/attempt`, `tool/call`, `tool/result`, `turn/start`, `turn/end`, `step/start`, `step/end` и `request/header`.
+- `tools/pre-execute`, `tools/execute`, `tools/post-execute` — waterfall-события инструментов; `tools/result` — событие результата. Таким образом нативные хуки есть. Требуется учитывать scope: подписчик уровня агента получает соответствующие события только для принадлежащих ему сессий/инструментов; перед интеграцией надо определить доступный scope конкретного Host-плагина.
+- `agent/assistant-stream` — process-local потоковое событие агента; его фреймы временны, тогда как итоговый `assistant/message` или `assistant/attempt` записывается в сессию. `agent/request` в установленных декларациях помечен deprecated; новый интегратор не должен на него полагаться.
 
-## 3. Формат стрима событий
+### Конфигурация и фактический протокол модели
 
-События приходят не через SSE, а пишутся в `session.v4.jsonl`. Примеры реальных событий из сессии:
+- В установленной конфигурации `@deepseek-ai/dsh-llm-deepseek` поле `baseURL` существует; декларация говорит, что оно может использовать доверенный `DEEPSEEK_BASE_URL`, иначе используется публичный API. Launcher `--help` не содержит отдельного флага base URL. Поэтому утверждение «base URL отсутствует/не настраивается» не подтверждено и противоречит установленной декларации.
+- Проверен исходный код установленного DeepSeek Messages адаптера: он POST-ит на `/messages` с `Accept: text/event-stream`; парсер разбирает SSE JSON-фреймы, проверяет согласованность типа события и обрабатывает ошибки. Транслятор знает блоки `text`, `thinking`, `tool_use`, соответствующие текстовые/thinking/JSON-аргументные delta-события, причины остановки `end_turn`, `stop_sequence`, `tool_use`, `max_tokens` и поля usage-токенов.
+- Это доказательство реализации клиентского адаптера, а не наблюдение ответа удалённого API. В рамках M1 прямой сетевой запрос к провайдеру не выполнялся; фактический сетевой SSE wire-stream провайдера не подтверждён и запрос не требуется для проверки доступных локальных нативных событий.
+- Декларация `request/header` подтверждает запись заголовка следующего запроса (включая его конфигурацию маршрута); `assistant/message` несёт usage только если адаптер его предоставил.
 
-```jsonl
-{"type":"session","version":4,"id":"session-...","createdAt":1794845464258,"cwd":"C:\\...","isSeeded":false,"delegationDepth":0}
-{"type":"permission/preset","seq":0,"time":1794845464287,"data":{"preset":"danger-full-access"}}
-{"type":"agent/inbox/spliced","seq":3,"time":1794845464298,"data":{"target":"next-turn","start":0,"inserted":[{"content":[{"type":"text","text":"..."}],"source":{"kind":"user"},"role":"user","id":"..."}]}}
-{"type":"turn/start","seq":4,"time":1794845464300,"data":{"turn":1}}
-{"type":"system/message","seq":7,"time":1794845464612,"data":{"turn":1,"step":1,"message":{...}}}
-{"type":"user/message","seq":8,"time":1794845464613,"data":{"content":[{"type":"text","text":"..."}],"source":{"kind":"user"},"role":"user","id":"..."}}
-{"type":"request/header","seq":11,"time":1794845464619,"data":{"header":{"config":{"provider":"kilofree","model":"..."},"adapterDefaults":{},"tools":[...]}}}
-{"type":"assistant/message","seq":15,"time":1794845471781,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"reasoning","text":"..."},{"type":"tool-call","id":"call-...","name":"read","arguments":"{...}"}]}}}
-{"type":"tool/call","seq":16,"time":1794845471786,"data":{"turn":1,"step":1,"callId":"call-...","name":"read","arguments":"{\"file_path\":\"kilotarget.txt\"}"}}
-{"type":"tool/result","seq":17,"time":1794845471809,"data":{"turn":1,"step":1,"message":{...},"toolCallId":"call-...","content":[...],"isError":false,"meta":{"path":"C:\\...","offset":1,"lines":[...],"totalLines":1}}}
-{"type":"step/end","seq":18,"time":1794845471809,"data":{"turn":1,"step":1}}
-{"type":"turn/end","seq":23,"time":1794845474396,"data":{"turn":1,"reason":{"kind":"completed"}}}
-```
+### Фактическая сессия и живой поток событий
 
-**Вывод:** событий хватает для карты. `tool/call` → `tool.start`, `tool/result` → `tool.end` (статус ok/err по `isError`).
+- Локальные файлы persistent session обнаружены под `%USERPROFILE%\.dsh\sessions`. Сессионный JSONL содержит структурированные записи с типом события, последовательностью и данными; при мониторинге файлов анализировались только поля типа/времени и безопасные идентификаторы события — prompt, аргументы, результаты и содержимое файлов не считывались для отчёта.
+- Для активной сессии текущего рабочего каталога обнаружены реальные типы `turn/start`, `step/start`, `step/end`, `request/header`, `assistant/message`, `assistant/attempt`, `tool/call`, `tool/result`, `turn/end`. В хвосте на момент проверки: 63 `tool/call`, 70 `tool/result`, 36 `assistant/message`, 47 `assistant/attempt` и 1 пара `turn/start`/`turn/end`. Числа — снимок меняющегося живого файла, не контракт.
+- Это подтверждает живые структурированные сессионные события и нативный путь наблюдения. Однако автоматический дисковый JSONL — post-commit persistent feed, а не эквивалент синхронных pre/post hook; для немедленных границ вызова следует предпочесть соответствующие Cordis tool hooks, когда нужный scope доступен.
+- Подтверждён формат событий сессии на диске, а не сетевой SSE ответ модели. Парсер SSE нужен только если отдельное требование потребует исследовать/проксировать запрос к провайдеру.
 
-## 4. ОС, терминал, размер экрана
+## Выбранное подключение
 
-- ОС: Windows 10/11 (пути `C:\Users\user\...`).
-- Терминал: не TUI — веб-GUI на `127.0.0.1:3080`.
-- Оконный API: Windows — `EnumWindows` + `GetWindowRect` через `user32.dll`. PID окна веб-GUI не получается напрямую из `dsh web` (процесс node).
+**Вариант A — нативные Cordis-хуки и профильный Host-плагин (предпочтительно).** В установленных пакетах есть документированный механизм Host-плагина, живые scoped session hooks, события инструментов и подтверждённая активная сессия. Для будущего наблюдателя нужно ограничить данные безопасными метаданными и не включать содержимое prompt/arguments/results в UI или логи. **M1 подтверждает техническую жизнеспособность A на уровне API и событий**, но ещё не подтверждает развёртывание собственного Host-плагина в этом пользовательском профиле и end-to-end видимость событий этим плагином; это проверка интеграции M2.
 
-## 5. Выбранный вариант подключения
+Вариант B (локальный прокси) технически возможен для пути DeepSeek Messages при настройке `baseURL`/доверенного `DEEPSEEK_BASE_URL`, но менее чист, чем доступные нативные хуки, требует отдельного захвата provider stream и не подтверждён live-сетевым тестом. Вариант C (PTY) для обнаруженного Web GUI не выбран. Вариант D не нужен.
 
-**Вариант C (PTY) невозможен** — нет TUI процесса, который можно было бы обёрнуть.
-**Вариант B (прокси перед API) невозможен** — `base_url` неExposeется.
-**Вариант D (гибрид) не нужен.**
+## Команды и доказательства
 
-Выбран **новый подход: хвост сессионного JSONL** (`session.v4.jsonl`).
-- Daemon (`dsmapd`) находит последнюю сессию для текущей `cwd` и tailит `session.v4.jsonl`.
-- Парсит строки JSONL: `tool/call` → `tool.start`, `tool/result` → `tool.end`, `assistant/message` с `tool-call` → начало вызова, `turn/start` → `prompt`, `turn/end` → `answer`.
-- События відправляются на локальный WS порт для окна ds-map.
+- `dsh --version` → `0.2.2-rc.1`.
+- `dsh --help` → проверены команды profile, plugin и patch; флага base URL в launcher help нет.
+- `[System.Environment]::OSVersion.VersionString` → `Microsoft Windows NT 10.0.26200.0`.
+- `$PSVersionTable.PSVersion.ToString()` → `5.1.26100.9818`.
+- `node --version` → `v24.20.0`; `pnpm --version` → `12.16.1`.
+- `Get-NetTCPConnection -LocalPort 3080 -State Listen` → `127.0.0.1:3080` в состоянии Listen.
+- Браузер: `GET http://127.0.0.1:3080/` без credentials → `401 Unauthorized`.
+- `Get-ChildItem "$env:USERPROFILE\.dsh\sessions" -Filter session.v4.jsonl -Recurse -File` → найдены файлы persistent sessions; в результатах учитывались имена/размеры/времена, содержимое не печаталось.
+- Агрегирование `type` из последних строк активной session JSONL через PowerShell `ConvertFrom-Json` → перечисленные выше live event type/counts; значения полей `data` не печатались.
+- Исходники/объявления установленных пакетов, проверенные для API: `dsh-session/lib/types/index.d.ts` (Cordis session events), `dsh-session/lib/types/types.d.ts` (event map), `dsh-agent/lib/types/runtime-types.d.ts` (agent hooks), `dsh-tools/lib/types/events.d.ts` (tool hooks), `dsh-llm-deepseek/lib/types/config.d.ts` (`Config.baseURL`), `dsh-llm-deepseek/lib/index.js` (реализация Messages SSE parser/translator).
 
-Это работает без модификации харнеса, без `base_url`, без PTY.
+## Ограничения вывода
 
-## 6. Проверено
-
-- `dsh --version` → `0.2.2-rc.1`
-- Порт 3080 открыт (веб-GUI работает).
-- `session.v4.jsonl` читается, содержит `tool/call` и `tool/result` с именами инструментов (`read`, `bash`, и т.д.).
-- Файл сессии для текущего проекта `c:\Users\user\Desktop\fun proj` — путь `C:\Users\user\.dsh\sessions\--c-Users-user-Desktop-fun~0020proj--\` (сессия пока пуста/не создана).
-
-## Выход фазы M1
-
-Вариант: **хвост сессионного JSONL** (вариант E, вариант D не требуется).
-Почему: у харнеса нет настраиваемого `base_url` и нет TUI для PTY. Сессионный JSONL — единственный надёжный источник событий инструментов.
+- Не утверждается, что удалённый SSE endpoint был проверен или что какой-либо отдельный терминальный эмулятор идентифицирован.
+- Декларации API и статический код подтверждают интерфейсы/поведение установленного клиента; доступность конкретного scope и установка отдельного Host-плагина остаются интеграционной проверкой M2.
+- Модельные session events могут содержать приватное содержимое (в частности, prompt, raw tool arguments, результаты, tool metadata). Будущий сборщик обязан извлекать только allowlisted метаданные; сам факт наличия event hook не разрешает сохранять payload целиком.

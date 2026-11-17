@@ -63,16 +63,18 @@ async function main() {
 
   // 5. Ждём появления порта и запускаем окно Electron
   await new Promise((r) => setTimeout(r, 1500)) // даём сайдкару время запуститься
-  launchElectron(port, server.getToken()!)
+  launchElectron(port, server.getToken()!, harnessProc.pid)
 
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 }
 
-function launchElectron(port: number, token: string): void {
+function launchElectron(port: number, token: string, harnessPid?: number): void {
   const electronPath = require.resolve('electron')
   const mainPath = path.join(__dirname, 'ui', 'main.js')
-  electronProc = spawn(electronPath, [mainPath, `--port=${port}`, `--token=${token}`], {
+  const electronArgs = [mainPath, `--port=${port}`, `--token=${token}`]
+  if (harnessPid) electronArgs.push(`--harness-pid=${harnessPid}`)
+  electronProc = spawn(electronPath, electronArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: process.env,
   })
