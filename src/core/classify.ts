@@ -104,9 +104,17 @@ export function classifyShell(cmd: string): Station {
 
 export function classifyTool(name: string): Station {
   const n = name.toLowerCase()
+
+  // DSH-специфичные инструменты — точные совпадения и префиксы
+  if (n === 'ask_user_question' || n.startsWith('ask_')) return 'agents'
+  if (n === 'create_goal' || n === 'update_goal') return 'skills'
+  if (n === 'todo_write' || n.startsWith('todo_')) return 'skills'
+  if (n === 'working-directory:current') return 'files'
+  if (n === 'time-context') return 'memory'
+
+  // read_file, write_file, edit, grep, glob и т.п. → files
   if (FILES.has(n)) return 'files'
   if (WEB.has(n)) return 'web'
-  // read_file, write_file, edit, grep, glob и т.п. → files
   if (n.includes('file') || n.includes('read') || n.includes('write') || n.includes('edit') || n.includes('grep') || n.includes('glob')) return 'files'
   if (n.includes('web') || n.includes('fetch') || n.includes('search') || n.includes('http')) return 'web'
   if (n.includes('agent') || n.includes('subagent')) return 'agents'

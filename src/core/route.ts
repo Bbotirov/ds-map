@@ -152,23 +152,37 @@ export function toolEnd(raw: RawToolResult): ToolEndEvent {
  * Безопасная метка: только имя, никогда содержимое.
  */
 function mapLabel(name: string, args: string | Record<string, unknown>): string {
+  // Попытка распарсить аргументы как JSON (DSH передаёт structured args в строку)
+  let parsed: Record<string, unknown> | undefined
+  if (typeof args === 'string') {
+    try {
+      const p = JSON.parse(args)
+      if (p && typeof p === 'object' && !Array.isArray(p)) parsed = p as Record<string, unknown>
+    } catch {
+      // не JSON — оставим как строку
+    }
+  } else if (typeof args === 'object' && args !== null) {
+    parsed = args
+  }
+
   const n = name.toLowerCase()
   if (n === 'read' || n === 'read_file' || n === 'write_file' || n === 'edit') {
-    if (typeof args === 'string') return fileLabel(args)
-    if (args && typeof args === 'object' && 'path' in args) return fileLabel(String(args.path))
+    if (parsed && 'path' in parsed) return fileLabel(String(parsed.path))
+    if (parsed && 'file_path' in parsed) return fileLabel(String(parsed.file_path))
+    if (typeof args === 'string' && !parsed) return fileLabel(args)
     return 'unknown'
   }
-  if (n === 'bash' || n === 'shell' || n === 'command') {
-    if (typeof args === 'string') return commandLabel(args)
-    if (args && typeof args === 'object' && 'command' in args) return commandLabel(String(args.command))
+  if (n === 'bash' || n === 'shell' || n === 'command' || n === 'pwsh' || n === 'powershell') {
+    if (typeof args === 'string' && !parsed) return commandLabel(args)
+    if (parsed && 'command' in parsed) return commandLabel(String(parsed.command))
     return 'unknown'
   }
   if (n === 'grep' || n === 'search' || n === 'glob') {
     return name
   }
   if (n === 'web' || n === 'fetch' || n === 'web_search') {
-    if (typeof args === 'string') return urlLabel(args)
-    if (args && typeof args === 'object' && 'url' in args) return urlLabel(String(args.url))
+    if (parsed && 'url' in parsed) return urlLabel(String(parsed.url))
+    if (typeof args === 'string' && !parsed) return urlLabel(args)
     return name
   }
   return name

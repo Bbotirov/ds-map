@@ -38,24 +38,46 @@ export class SessionTailer {
 
   /**
    * Найти последнюю сессию для текущей cwd.
-   * Каталоги сессий называются --<cwd-escaped>--.
+   * Структура: sessions/--<cwd-escaped>--/<session-id>/session.v4.jsonl
+   * Экранирование cwd: ":" 제거, "\" → "-", пробел → "~0020", оборачивается в "--".
    */
   findSessionForCwd(cwd: string): string | null {
     try {
       const entries = fs.readdirSync(SESSIONS_ROOT, { withFileTypes: true })
-      const escaped = cwd.replace(/[/\\]/g, '-').replace(/:/g, '')
+      const escaped = escapeCwd(cwd)
       const prefix = `--${escaped}--`
-      const matches = entries
+      const cwdDirs = entries
         .filter((e) => e.isDirectory() && e.name.startsWith(prefix))
         .map((e) => path.join(SESSIONS_ROOT, e.name))
-      if (matches.length === 0) return null
-      // Берём самую новую по дате модификации каталога
-      matches.sort((a, b) => {
-        const sa = fs.statSync(a).mtimeMs
-        const sb = fs.statSync(b).mtimeMs
-        return sb - sa
-      })
-      return matches[0]
+      if (cwdDirs.length === 0) return null
+
+      // Внутри --cwd-- каталога есть подкаталоги с ID сессий, каждый содержит session.v4.jsonl
+      // Берём самую новую сессию по дате модификации session.v4.jsonl
+      let latestSessionDir: string | null = null
+      let latestTime = 0
+
+      for (const cwdDir of cwdDirs) {
+        try {
+          const sessionEntries = fs.readdirSync(cwdDir, { withFileTypes: true })
+          for (const se of sessionEntries) {
+            if (!se.isDirectory()) continue
+            const sessionFile = path.join(cwdDir, se.name, 'session.v4.jsonl')
+            try {
+              const stat = fs.statSync(sessionFile)
+              if (stat.mtimeMs > latestTime) {
+                latestTime = stat.mtimeMs
+                latestSessionDir = path.join(cwdDir, se.name)
+              }
+            } catch {
+              // session.v4.jsonl ещё не создан
+            }
+          }
+        } catch {
+          // пропускаем недоступный каталог
+        }
+      }
+
+      return latestSessionDir
     } catch {
       return null
     }
@@ -232,4 +254,15 @@ export class SessionTailer {
         return null
     }
   }
+}
+
+/**
+ * Экранировать cwd в имя каталога сессии DSH.
+ * Пример: "c:\\Users\\user\\Desktop\\fun proj" → "c-Users-user-Desktop-fun~0020proj"
+ */
+function escapeCwd(cwd: string): string {
+  return cwd
+    .replace(/:/g, '')           // убрать двоеточие после буквы диска
+    .replace(/\\/g, '-')         // обратные слэши → дефисы
+    .replace(/ /g, '~0020')      // пробелы → URL-кодировка
 }

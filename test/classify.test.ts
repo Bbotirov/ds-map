@@ -104,6 +104,15 @@ describe('classifyTool', () => {
     ['hook', 'hooks'],
     ['memory', 'memory'],
     ['browser', 'browser'],
+    // DSH-специфичные инструменты
+    ['ask_user_question', 'agents'],
+    ['create_goal', 'skills'],
+    ['update_goal', 'skills'],
+    ['todo_write', 'skills'],
+    ['time-context', 'memory'],
+    ['working-directory:current', 'files'],
+    ['ask_web_search', 'agents'],
+    ['todo_list', 'skills'],
   ])('%s → %s', (name, expected) => {
     expect(classifyTool(name)).toBe(expected)
   })
