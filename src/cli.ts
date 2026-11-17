@@ -9,13 +9,23 @@ import { DaemonServer } from './daemon/server.js'
 import { EventBus } from './daemon/bus.js'
 import { SessionTailer } from './daemon/session.js'
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import * as fs from 'node:fs'
 
+const require = createRequire(import.meta.url)
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
 const bus = new EventBus()
 const server = new DaemonServer(bus)
 const tailer = new SessionTailer(bus)
+
+// Подписка на события для отображения в консоли (M2: live console feed)
+bus.subscribe((e) => {
+  process.stdout.write(`[${new Date(e.ts).toISOString()}] ${e.t}\n`)
+})
 
 let harnessProc: ReturnType<typeof spawn> | null = null
 let electronProc: ReturnType<typeof spawn> | null = null
@@ -99,7 +109,8 @@ function runDoctor(): void {
 }
 
 function launchElectron(port: number, token: string, harnessPid?: number): void {
-  const electronPath = require.resolve('electron')
+  const electronDir = path.dirname(require.resolve('electron'))
+  const electronPath = path.join(electronDir, 'dist', 'electron.exe')
   const mainPath = path.join(__dirname, 'ui', 'main.js')
   const electronArgs = [mainPath, `--port=${port}`, `--token=${token}`]
   if (harnessPid) electronArgs.push(`--harness-pid=${harnessPid}`)

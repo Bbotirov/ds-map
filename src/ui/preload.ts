@@ -3,7 +3,9 @@
  * Отдаёт рендереру только узкий список через contextBridge.
  */
 
-import { contextBridge, ipcRenderer } from 'electron'
+import electron from 'electron'
+
+const { contextBridge, ipcRenderer } = electron
 
 contextBridge.exposeInMainWorld('dsmap', {
   onEvent: (cb: (e: unknown) => void) => {

@@ -201,6 +201,11 @@ export class SessionTailer {
         return prompt(0)
       }
 
+      case 'step/start': {
+        // Шаг модели — событие model.step
+        return modelStep({ used: 0, max: 0 })
+      }
+
       case 'user/message': {
         const chars = Array.isArray(data.content)
           ? data.content.reduce((sum: number, c: any) => sum + (c.text?.length ?? 0), 0)

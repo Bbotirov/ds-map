@@ -4,12 +4,15 @@
  * Пристегивание к окну харнеса справа с_tracking'ом позиции.
  */
 
-import { app, BrowserWindow, screen, ipcMain } from 'electron'
+import electron from 'electron'
+import type { BrowserWindow } from 'electron'
 import * as path from 'node:path'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import WebSocket from 'ws'
 import { findWindowByPid, computePanelBounds, type WindowBounds } from './window.js'
+
+const { app, BrowserWindow: BW, screen, ipcMain } = electron
 
 let panel: BrowserWindow | null = null
 let ws: WebSocket | null = null
@@ -65,7 +68,7 @@ async function start() {
   // Начальная позиция: правый край экрана (fallback)
   const initial = computePanelBounds(null, width, height)
 
-  panel = new BrowserWindow({
+  panel = new BW({
     width: initial.width,
     height: initial.height,
     x: initial.x,
