@@ -5,16 +5,16 @@
  */
 
 import electron from 'electron'
-import type { BrowserWindow } from 'electron'
+import type { BrowserWindow as BrowserWindowCtor, IpcMainInvokeEvent } from 'electron'
 import * as path from 'node:path'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import WebSocket from 'ws'
 import { findWindowByPid, computePanelBounds, type WindowBounds } from './window.js'
 
-const { app, BrowserWindow: BW, screen, ipcMain } = electron
+const { app, BrowserWindow, screen, ipcMain } = electron
 
-let panel: BrowserWindow | null = null
+let panel: BrowserWindowCtor | null = null
 let ws: WebSocket | null = null
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
 let trackTimer: ReturnType<typeof setInterval> | null = null
@@ -68,7 +68,7 @@ async function start() {
   // Начальная позиция: правый край экрана (fallback)
   const initial = computePanelBounds(null, width, height)
 
-  panel = new BW({
+  panel = new BrowserWindow({
     width: initial.width,
     height: initial.height,
     x: initial.x,
@@ -88,14 +88,14 @@ async function start() {
     },
   })
 
-  await panel.loadFile(path.join(__dirname, 'index.html'))
-  panel.showInactive()
+  await panel!.loadFile(path.join(__dirname, 'index.html'))
+  panel!.showInactive()
 
   connectWS(PORT, TOKEN)
 
   // IPC handlers для конфига
   ipcMain.handle('config:get', () => ({ ...config }))
-  ipcMain.handle('config:set', (_e, patch: unknown) => {
+  ipcMain.handle('config:set', (_e: IpcMainInvokeEvent, patch: unknown) => {
     if (patch && typeof patch === 'object') {
       const p = patch as Record<string, unknown>
       if (p.theme === 'light' || p.theme === 'dark') config.theme = p.theme
