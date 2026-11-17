@@ -6,6 +6,8 @@
 
 import { app, BrowserWindow, screen, ipcMain } from 'electron'
 import * as path from 'node:path'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
 import WebSocket from 'ws'
 import { findWindowByPid, computePanelBounds, type WindowBounds } from './window.js'
 
@@ -20,6 +22,31 @@ const PORT = parseInt(process.argv.find((a) => a.startsWith('--port='))?.split('
 const TOKEN = process.argv.find((a) => a.startsWith('--token='))?.split('=')[1] ?? ''
 const HARNESS_PID_ARG = process.argv.find((a) => a.startsWith('--harness-pid='))
 
+const CONFIG_PATH = path.join(os.homedir(), '.dsh', 'dsmap-config.json')
+
+let config: { theme: 'dark' | 'light'; lang: 'ru' | 'en'; motion: 'full' | 'reduced' } = { theme: 'dark', lang: 'ru', motion: 'full' }
+
+function loadConfig(): void {
+  try {
+    const raw = fs.readFileSync(CONFIG_PATH, 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed.theme === 'light' || parsed.theme === 'dark') config.theme = parsed.theme as 'dark' | 'light'
+    if (parsed.lang === 'ru' || parsed.lang === 'en') config.lang = parsed.lang as 'ru' | 'en'
+    if (parsed.motion === 'full' || parsed.motion === 'reduced') config.motion = parsed.motion as 'full' | 'reduced'
+  } catch {
+    // config not found — defaults
+  }
+}
+
+function saveConfig(): void {
+  try {
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true })
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config), { mode: 0o600 })
+  } catch {
+    // ignore
+  }
+}
+
 if (HARNESS_PID_ARG) {
   harnessPid = parseInt(HARNESS_PID_ARG.split('=')[1], 10)
 }
@@ -32,6 +59,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function start() {
+  loadConfig()
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
 
   // Начальная позиция: правый край экрана (fallback)
@@ -63,8 +91,17 @@ async function start() {
   connectWS(PORT, TOKEN)
 
   // IPC handlers для конфига
-  ipcMain.handle('config:get', () => ({ theme: 'dark', lang: 'ru', motion: 'full' }))
-  ipcMain.handle('config:set', (_e, patch: unknown) => patch)
+  ipcMain.handle('config:get', () => ({ ...config }))
+  ipcMain.handle('config:set', (_e, patch: unknown) => {
+    if (patch && typeof patch === 'object') {
+      const p = patch as Record<string, unknown>
+      if (p.theme === 'light' || p.theme === 'dark') config.theme = p.theme
+      if (p.lang === 'ru' || p.lang === 'en') config.lang = p.lang
+      if (p.motion === 'full' || p.motion === 'reduced') config.motion = p.motion
+      saveConfig()
+    }
+    return { ...config }
+  })
 
   // Если Known PID — начинаем отслеживание позиции окна харнеса
   if (harnessPid) {

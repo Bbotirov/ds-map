@@ -165,23 +165,26 @@ function formatTime(ts: number): string {
 function applyTheme(theme: Theme): void {
   setup.theme = theme
   document.body.setAttribute('class', theme)
+  updateButtons()
   render()
+  window.dsmap?.setConfig({ theme })
 }
 
 function applyLang(lang: Language): void {
   setup.lang = lang
   updateButtons()
   render()
+  window.dsmap?.setConfig({ lang })
 }
 
 function updateButtons(): void {
-  themeBtn.textContent = setup.theme === 'dark' ? t('ru', 'themeDark') : t('ru', 'themeLight')
-  langBtn.textContent = setup.lang === 'ru' ? t('ru', 'languageRu') : t('ru', 'languageEn')
-  motionBtn.textContent = setup.motion === 'full' ? t('ru', 'motionFull') : t('ru', 'motionReduced')
+  themeBtn.textContent = t(setup.lang, setup.theme === 'dark' ? 'themeDark' : 'themeLight')
+  langBtn.textContent = t(setup.lang, setup.lang === 'ru' ? 'languageRu' : 'languageEn')
+  motionBtn.textContent = t(setup.lang, setup.motion === 'full' ? 'motionFull' : 'motionReduced')
 }
 
 function updateMotionBtn(): void {
-  motionBtn.textContent = setup.motion === 'full' ? t('ru', 'motionFull') : t('ru', 'motionReduced')
+  motionBtn.textContent = t(setup.lang, setup.motion === 'full' ? 'motionFull' : 'motionReduced')
 }
 
 function render(): void {
@@ -215,4 +218,5 @@ function loop(): void {
 function needsTrailFade(now: number): boolean {
   return state.trail.length > 0 && now - state.trail[state.trail.length - 1].ts < 60000
 }
+
 
