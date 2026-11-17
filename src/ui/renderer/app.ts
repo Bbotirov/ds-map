@@ -14,6 +14,7 @@ let state: State = {
   trail: [],
   stationCounts: new Map(),
   activeCalls: new Map(),
+  stationErrors: new Map(),
   contextPct: 0,
 }
 
@@ -92,6 +93,8 @@ function onEvent(e: unknown): void {
       break
 
     case 'prompt':
+      // Очищаем ошибки станций на новом сообщении пользователя (M6)
+      state.stationErrors.clear()
       addTrail('you', now)
       break
 
@@ -113,9 +116,11 @@ function onEvent(e: unknown): void {
     case 'tool.end': {
       const active = [...state.activeCalls.entries()].find(([_, v]) => now - v.startedAt < 60000)
       if (active) {
-        state.activeCalls.delete(active[0])
+        const [station] = active
+        state.activeCalls.delete(station)
         if (ev.status === 'err') {
-          feed.markError(active[0], active[0])
+          state.stationErrors.set(station, { label: station, ts: now })
+          feed.markError(station, station)
         }
       }
       state.pulses = state.pulses.filter((p) => now - p.startedAt < PULSE_MS * 2)
@@ -210,3 +215,4 @@ function loop(): void {
 function needsTrailFade(now: number): boolean {
   return state.trail.length > 0 && now - state.trail[state.trail.length - 1].ts < 60000
 }
+

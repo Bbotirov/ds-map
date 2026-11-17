@@ -51,6 +51,7 @@ export interface State {
   trail: TrailEntry[]
   stationCounts: Map<string, number>
   activeCalls: Map<string, { station: string; startedAt: number }>
+  stationErrors: Map<string, { label: string; ts: number }>
   contextPct: number
 }
 
@@ -129,6 +130,13 @@ function drawStation(
     const outer = ((elapsed / 600_000) * 360) % 360
     el += `<line x1="0" y1="0" x2="0" y2="${-NODE - 4}" stroke="${c.text}" stroke-width="1" transform="rotate(${inner})"/>`
     el += `<line x1="0" y1="0" x2="0" y2="${-NODE - 8}" stroke="${c.label}" stroke-width="1" transform="rotate(${outer})"/>`
+  }
+
+  // красная точка ошибки на станции (M6: держится до следующего сообщения пользователя)
+  const err = state.stationErrors.get(id)
+  if (err) {
+    el += `<circle r="6" fill="${c.error}" opacity="0.9"/>`
+    el += `<text x="0" y="4" text-anchor="middle" font-size="8" fill="${c.background}" font-weight="bold" font-family="system-ui, sans-serif">✕</text>`
   }
 
   el += `<text x="0" y="${NODE + 14}" text-anchor="middle" font-size="10" fill="${c.label}" font-family="system-ui, sans-serif">${label}</text>`
