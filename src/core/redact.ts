@@ -3,6 +3,8 @@
  * Маппер падает тихо (fail-open) — любой сбой даёт станцию shell и метку unknown.
  */
 
+// Вырезаем управляющие символы (поток не должен содержать промпты/содержимое файлов).
+// eslint-disable-next-line no-control-regex
 const CTRL = /[\u0000-\u001f\u007f-\u009f]/g
 const MAX = 48
 
@@ -31,11 +33,23 @@ export function urlLabel(u: string): string {
 }
 
 /**
- * Метка шелл-команды — только имя команды.
+ * Метка шелл-команды — имя команды плюс подкоманда, если она bare-слово.
+ * `git status` и `pnpm install` — это ещё имена, а `--pattern`, `./src/x.ts`
+ * и `2>&1` — уже командная строка, её показывать нельзя (§7 правило 5).
  */
+const SUBCOMMAND = /^[a-z][a-z0-9_-]{1,15}$/
+
 export function commandLabel(cmd: string): string {
-  const first = cmd.trim().split(/\s+/)[0] ?? ''
-  return clean(first.replace(/^["']|["']$/g, '').split(/[\\/]/).pop() ?? '').toLowerCase().replace(/\.exe$/, '')
+  const tokens = cmd.trim().split(/\s+/)
+  const first = baseName(tokens[0] ?? '')
+  if (!first) return clean('unknown')
+  const second = tokens[1] ?? ''
+  return clean(SUBCOMMAND.test(second) ? `${first} ${second}` : first)
+}
+
+/** Путь к исполняемому файлу → голое имя в нижнем регистре и без `.exe`. */
+function baseName(token: string): string {
+  return token.replace(/^["']|["']$/g, '').split(/[\\/]/).pop()?.toLowerCase().replace(/\.exe$/, '') ?? ''
 }
 
 /**

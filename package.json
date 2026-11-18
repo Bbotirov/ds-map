@@ -11,9 +11,9 @@
     "build": "tsc && node scripts/copy-ui.mjs",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src test",
+    "lint": "eslint src test scripts/copy-ui.mjs",
     "test": "vitest run",
-    "doctor": "node dist/doctor.js",
+    "doctor": "node dist/cli.js doctor",
     "pack": "electron-builder --dir",
     "dist": "electron-builder"
   },
@@ -30,10 +30,11 @@
     "electron-builder": "^24.0.0",
     "eslint": "^8.57.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.0.0",
+    "vitest": "^2.0.0"
+  },
+  "dependencies": {
     "ws": "^8.17.0"
   },
-  "dependencies": {},
   "build": {
     "appId": "dev.dsmap.app",
     "productName": "ds-map",

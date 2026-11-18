@@ -7,13 +7,12 @@
 import electron from 'electron'
 import type { BrowserWindow as BrowserWindowCtor, IpcMainInvokeEvent } from 'electron'
 import * as path from 'node:path'
-import * as fs from 'node:fs'
-import * as os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
 import { computePanelBounds, WindowWatcher, type WatcherState, type WindowBounds } from './window.js'
+import { normalizeConfig, readConfig, readEndpoint, writeConfig, type DsMapConfig, type Endpoint } from '../shared/config.js'
 
-const { app, BrowserWindow, screen, ipcMain } = electron
+const { app, BrowserWindow, screen, ipcMain, Menu } = electron
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -28,8 +27,11 @@ let lastBoundsKey = ''
 let hiddenWithHarness = false
 let docked = false
 
-const PORT = parseInt(process.argv.find((a) => a.startsWith('--port='))?.split('=')[1] ?? '0', 10)
-const TOKEN = process.argv.find((a) => a.startsWith('--token='))?.split('=')[1] ?? ''
+// Аргументы — только для ручного запуска панели (`electron dist/ui/main.js --port=…`).
+// В нормальном режиме порт и токен через командную строку не передаются: в argv
+// токен увидел бы любой, кто перечисляет процессы, а §12 требует файл с 600.
+const ARG_PORT = parseInt(process.argv.find((a) => a.startsWith('--port='))?.split('=')[1] ?? '0', 10)
+const ARG_TOKEN = process.argv.find((a) => a.startsWith('--token='))?.split('=')[1] ?? ''
 const HARNESS_PIDS = process.argv
   .filter((a) => a.startsWith('--harness-pid='))
   .flatMap((a) => a.slice('--harness-pid='.length).split(','))
@@ -37,29 +39,12 @@ const HARNESS_PIDS = process.argv
   .filter((v) => Number.isFinite(v) && v > 0)
 const HARNESS_TITLE = process.argv.find((a) => a.startsWith('--harness-title='))?.split('=')[1]
 
-const CONFIG_PATH = path.join(os.homedir(), '.dsh', 'dsmap-config.json')
+const config: DsMapConfig = readConfig()
 
-const config: { theme: 'dark' | 'light'; lang: 'ru' | 'en'; motion: 'full' | 'reduced' } = { theme: 'dark', lang: 'ru', motion: 'full' }
-
-function loadConfig(): void {
-  try {
-    const raw = fs.readFileSync(CONFIG_PATH, 'utf8')
-    const parsed = JSON.parse(raw)
-    if (parsed.theme === 'light' || parsed.theme === 'dark') config.theme = parsed.theme as 'dark' | 'light'
-    if (parsed.lang === 'ru' || parsed.lang === 'en') config.lang = parsed.lang as 'ru' | 'en'
-    if (parsed.motion === 'full' || parsed.motion === 'reduced') config.motion = parsed.motion as 'full' | 'reduced'
-  } catch {
-    // нет файла — дефолты
-  }
-}
-
-function saveConfig(): void {
-  try {
-    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true })
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config), { mode: 0o600 })
-  } catch {
-    // конфиг не критичен, панель работает и без него
-  }
+/** Перечитывается на каждом подключении: сайдкар мог перезапуститься на новом порту. */
+function resolveEndpoint(): Endpoint | null {
+  if (ARG_PORT > 0 && ARG_TOKEN) return { port: ARG_PORT, token: ARG_TOKEN }
+  return readEndpoint()
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -70,7 +55,9 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function start() {
-  loadConfig()
+  // Родное меню Electron (File/Edit/View…) съедает 25 px и не несёт ничего
+  // полезного: в панели всё управление уже есть в тулбаре.
+  Menu.setApplicationMenu(null)
   const display = screen.getPrimaryDisplay()
   const initial = computePanelBounds(null, display.workArea)
 
@@ -79,13 +66,11 @@ async function start() {
   // с пустыми подписями тулбара.
   ipcMain.handle('config:get', () => ({ ...config }))
   ipcMain.handle('config:set', (_e: IpcMainInvokeEvent, patch: unknown) => {
-    if (patch && typeof patch === 'object') {
-      const p = patch as Record<string, unknown>
-      if (p.theme === 'light' || p.theme === 'dark') config.theme = p.theme
-      if (p.lang === 'ru' || p.lang === 'en') config.lang = p.lang
-      if (p.motion === 'full' || p.motion === 'reduced') config.motion = p.motion
-      saveConfig()
-    }
+    const incoming = patch && typeof patch === 'object' ? (patch as Record<string, unknown>) : {}
+    // normalizeConfig — единственный валидатор: поля вне списка и мусорные значения
+    // в конфиг не попадают ниоткуда, включая ручную правку файла.
+    Object.assign(config, normalizeConfig({ ...config, ...incoming }))
+    writeConfig(config)
     return { ...config }
   })
 
@@ -112,7 +97,7 @@ async function start() {
   await panel.loadFile(path.join(HERE, 'index.html'))
   panel.showInactive()
 
-  connectWS(PORT, TOKEN)
+  connectWS()
 
   // Кандидаты на окно-якорь приходят из cli.ts: терминал и сам харнес.
   // Свой ppid сюда не добавляем: у dsmap-процесса окна нет, а его дерево
@@ -122,12 +107,14 @@ async function start() {
   } else {
     console.log('[ds-map] PID харнеса неизвестен — панель у правого края экрана')
   }
+  watchOwner()
 
   panel.on('closed', () => {
     panel = null
     watcher?.stop()
     watcher = null
   })
+
 
   app.on('window-all-closed', () => {
     watcher?.stop()
@@ -142,8 +129,26 @@ async function start() {
   })
 }
 
-function startWatching(pids: number[]): void {
-  watcher = new WindowWatcher({
+/**
+ * На Windows лаунчер, снятый диспетчером задач или `taskkill`, не оставляет
+ * панели шанса отработать обработчик выхода. Поэтому панель сама следит за
+ * родителем: умер владелец — закрываемся, чтобы не висеть сиротой.
+ */
+function watchOwner(): void {
+  const owner = Number.parseInt(process.env.DSMAP_OWNER_PID ?? '', 10)
+  if (!Number.isInteger(owner) || owner <= 0 || owner === process.pid || !panel) return
+  const timer = setInterval(() => {
+    try {
+      process.kill(owner, 0)
+    } catch {
+      console.log('[ds-map] лаунчер завершился — панель закрывается')
+      app.quit()
+    }
+  }, 2_000)
+  panel.once('closed', () => clearInterval(timer))
+}
+
+function startWatching(pids: number[]): void {  watcher = new WindowWatcher({
     pids,
     scriptPath: path.join(HERE, 'window-watcher.ps1'),
     ...(HARNESS_TITLE ? { title: HARNESS_TITLE } : {}),
@@ -198,14 +203,21 @@ function dockTo(harness: WindowBounds): void {
   panel.setBounds(bounds, false)
 }
 
-function connectWS(port: number, token: string): void {
+function connectWS(): void {
   if (wsReconnectTimer) {
     clearTimeout(wsReconnectTimer)
     wsReconnectTimer = null
   }
 
+  const endpoint = resolveEndpoint()
+  if (!endpoint) {
+    // Сайдкар ещё не записал порт и токен — пробуем снова, как при обрыве.
+    scheduleReconnect()
+    return
+  }
+
   try {
-    ws = new WebSocket(`ws://127.0.0.1:${port}/events?token=${token}`)
+    ws = new WebSocket(`ws://127.0.0.1:${endpoint.port}/events?token=${endpoint.token}`)
     ws.on('open', () => {
       console.log('[ds-map] WS подключён')
       panel?.webContents.send('status', { connected: true })
@@ -220,17 +232,17 @@ function connectWS(port: number, token: string): void {
     ws.on('close', () => {
       ws = null
       panel?.webContents.send('status', { connected: false })
-      scheduleReconnect(port, token)
+      scheduleReconnect()
     })
     ws.on('error', () => {
       // молча: переподключение случится на close
     })
   } catch {
     panel?.webContents.send('status', { connected: false })
-    scheduleReconnect(port, token)
+    scheduleReconnect()
   }
 }
 
-function scheduleReconnect(port: number, token: string): void {
-  wsReconnectTimer = setTimeout(() => connectWS(port, token), 1_000)
+function scheduleReconnect(): void {
+  wsReconnectTimer = setTimeout(connectWS, 1_000)
 }

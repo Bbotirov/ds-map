@@ -1,5 +1,6 @@
 # Наблюдатель за окном харнеса: один процесс вместо PowerShell на каждый тик.
-# Вход: DSMAP_PID_LIST (список PID через запятую), опционально DSMAP_TITLE, DSMAP_INTERVAL_MS.
+# Вход: DSMAP_PID_LIST (PID через запятую), DSMAP_OWNER_PID (PID панели),
+#       опционально DSMAP_TITLE, DSMAP_INTERVAL_MS.
 # Выход: NDJSON — {"state":"bounds"...} | minimized | pending | gone. Строка только при смене.
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -55,6 +56,12 @@ $script:title = if ($env:DSMAP_TITLE) { $env:DSMAP_TITLE.ToLowerInvariant() } el
 $script:best = $null
 $script:rb = New-Object System.Text.StringBuilder 512
 
+# Панель — наш родитель. Если Electron убит снаружи, наблюдатель уходит сам:
+# иначе powershell переживёт панель и останется крутиться сиротой.
+[int]$script:ownerPid = 0
+if ($env:DSMAP_OWNER_PID) { [Void][int]::TryParse($env:DSMAP_OWNER_PID, [ref]$script:ownerPid) }
+$ownerGone = { $script:ownerPid -gt 0 -and -not (Get-Process -Id $script:ownerPid -ErrorAction SilentlyContinue) }
+
 $filter = [DsMapWinApi+EnumWindowsProc] {
   param($hWnd, $lParam)
   if (-not [DsMapWinApi]::IsWindowVisible($hWnd)) { return $true }
@@ -86,6 +93,7 @@ $filter = [DsMapWinApi+EnumWindowsProc] {
 $ticks = 0
 $last = ''
 while ($true) {
+  if (& $ownerGone) { break }
   $alive = @($watch | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
   # Родитель умер, но его потомки живы — следим за ними; дерево обновляем раз в ~2 секунды.
   if ($alive.Count -eq 0 -and $seeds.Count -gt 0) {

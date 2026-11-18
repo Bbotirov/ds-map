@@ -8,12 +8,12 @@
 import { DaemonServer } from './daemon/server.js'
 import { EventBus } from './daemon/bus.js'
 import { SessionTailer } from './daemon/session.js'
-import { spawn } from 'node:child_process'
+import { runDoctor } from './doctor.js'
+import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
-import * as os from 'node:os'
-import * as fs from 'node:fs'
+import { tokenPath } from './shared/config.js'
 
 const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -35,8 +35,7 @@ async function main() {
   const cmd = args[0]
 
   if (cmd === 'doctor') {
-    runDoctor()
-    return
+    process.exit(await runDoctor(process.cwd()))
   }
 
   if (cmd !== 'run') {
@@ -57,7 +56,7 @@ async function main() {
 
   // 1. Поднимаем сайдкар (локальный WS сервер)
   const port = await server.start()
-  console.log(`[ds-map] сайдкар запущен на порту ${port}, токен в ${path.join(os.homedir(), '.dsh', 'dsmap-token.txt')}`)
+  console.log(`[ds-map] сайдкар запущен на 127.0.0.1:${port}, токен в ${tokenPath()}`)
 
   // 2. Определяем cwd для поиска сессии
   const cwd = process.cwd()
@@ -88,63 +87,69 @@ async function main() {
   // PID харнеса добавляем на случай GUI-профиля (web/acp) и .cmd-обёрток:
   // наблюдатель сам расширяет список потомками.
   const pids = [process.ppid, harnessProc.pid].filter((p): p is number => typeof p === 'number' && p > 0)
-  launchElectron(port, server.getToken()!, pids)
+  launchElectron(pids)
 
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 }
 
-function runDoctor(): void {
-  const TOKEN_PATH = path.join(os.homedir(), '.dsh', 'dsmap-token.txt')
-  const PORT_PATH = path.join(os.homedir(), '.dsh', 'dsmap-port.txt')
-  const SESSIONS_ROOT = path.join(os.homedir(), '.dsh', 'sessions')
-
-  const failed: string[] = []
-  function check(name: string, passed: boolean, detail?: string): void {
-    console.log(`${passed ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`)
-    if (!passed) failed.push(name)
-  }
-
-  check('Токен сайдкара', fs.existsSync(TOKEN_PATH), TOKEN_PATH)
-  check('Порт сайдкара', fs.existsSync(PORT_PATH), PORT_PATH)
-  check('Каталог сессий DSH', fs.existsSync(SESSIONS_ROOT), SESSIONS_ROOT)
-  check('Зависимости установлены', fs.existsSync(path.join(process.cwd(), 'node_modules')))
-  check('Проект собран', fs.existsSync(path.join(process.cwd(), 'dist')), 'запустите pnpm build')
-
-  if (failed.length > 0) process.exit(1)
-}
-
-function launchElectron(port: number, token: string, harnessPids: number[]): void {
+function launchElectron(harnessPids: number[]): void {
   const electronDir = path.dirname(require.resolve('electron'))
   const electronPath = path.join(electronDir, 'dist', 'electron.exe')
   const mainPath = path.join(__dirname, 'ui', 'main.js')
-  const electronArgs = [mainPath, `--port=${port}`, `--token=${token}`]
+  // Порт и токен не передаются через аргументы: в командной строке токен
+  // прочитал бы любой перечислитель процессов. Окно берёт их из файлов сайдкара.
+  const electronArgs = [mainPath]
   for (const pid of harnessPids) electronArgs.push(`--harness-pid=${pid}`)
   if (process.env.DSMAP_TITLE) electronArgs.push(`--harness-title=${process.env.DSMAP_TITLE}`)
   electronProc = spawn(electronPath, electronArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: process.env,
+    // Owner-PID нужен панели и её наблюдателю: если этот процесс убили через
+    // диспетчер задач (на Windows сигнал обработчик не доходит), окно всё равно
+    // должно закрыться само и не остаться сиротой.
+    env: { ...process.env, DSMAP_OWNER_PID: String(process.pid) },
   })
   electronProc.stdout?.on('data', (d) => process.stdout.write(d))
   electronProc.stderr?.on('data', (d) => process.stderr.write(d))
 }
 
-function shutdown(): void {
-  if (harnessProc) {
-    try { harnessProc.kill('SIGTERM') } catch { /* ignored */ }
-    harnessProc = null
-  }
-  if (electronProc) {
-    try { electronProc.kill('SIGTERM') } catch { /* ignored */ }
-    electronProc = null
-  }
+/** Гасит всё, что подняли. Повторный вызов безвреден. */
+function shutdown(code = 0): void {
+  killTree(harnessProc)
+  harnessProc = null
+  killTree(electronProc)
+  electronProc = null
   tailer.stop()
   server.stop()
-  process.exit(0)
+  process.exit(code)
 }
+
+/**
+ * На Windows у ребёнка обычно есть обёртка: `.cmd`-лаунчер харнеса и `shell:true`
+ * ставят над ним cmd.exe, а `kill()` снимает только её. Без `taskkill /T`
+ * dsh и electron.exe переживают лаунчер и остаются висеть сиротами.
+ */
+function killTree(child: ReturnType<typeof spawn> | null): void {
+  if (!child?.pid) return
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    return
+  }
+  try {
+    child.kill('SIGTERM')
+  } catch {
+    // процесс уже мёртв
+  }
+}
+
+// Смерть процесса по любой причине тоже убирает порт и токен: иначе следующее
+// окно подключится к мёртвому порту и молча покажет пустую карту.
+process.on('exit', () => {
+  tailer.stop()
+  server.stop()
+})
 
 main().catch((err) => {
   console.error('[ds-map] fatal:', err)
-  shutdown()
-  process.exit(1)
+  shutdown(1)
 })

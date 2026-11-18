@@ -7,13 +7,10 @@ import http from 'node:http'
 import { WebSocketServer, WebSocket } from 'ws'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
+import { clearEndpointFiles, portPath, tokenPath } from '../shared/config.js'
 import { EventBus } from './bus.js'
 import type { DsMapEvent } from '../core/events.js'
-
-const TOKEN_PATH = path.join(os.homedir(), '.dsh', 'dsmap-token.txt')
-const PORT_FILE = path.join(os.homedir(), '.dsh', 'dsmap-port.txt')
 
 export class DaemonServer {
   private bus: EventBus
@@ -22,6 +19,10 @@ export class DaemonServer {
   private port: number | null = null
   private token: string | null = null
   private clients = new Set<WebSocket>()
+  // Недавняя история событий, чтобы только что подключившееся окно увидело
+  // сессию и уже произошедшие вызовы (реplay при подключении).
+  private recent: DsMapEvent[] = []
+  private readonly MAX_RECENT = 50
 
   constructor(bus: EventBus) {
     this.bus = bus
@@ -32,13 +33,21 @@ export class DaemonServer {
     return new Promise((resolve, reject) => {
       // Пишем токен с правами 600
       try {
-        fs.mkdirSync(path.dirname(TOKEN_PATH), { recursive: true })
-        fs.writeFileSync(TOKEN_PATH, this.token!, { mode: 0o600 })
+        fs.mkdirSync(path.dirname(tokenPath()), { recursive: true })
+        fs.writeFileSync(tokenPath(), this.token!, { mode: 0o600 })
       } catch {
-        // игнорируем ошибки записи токена
+        // Fail-open: без файла токена панель просто не увидит событий,
+        // а харнес и сайдкар продолжают работать.
       }
 
       this.server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
+        // Токен проверяется на каждом запросе (§12.3), даже если ответ — служебная строка.
+        const token = new URL(req.url ?? '', 'http://127.0.0.1').searchParams.get('token')
+        if (token !== this.token) {
+          res.writeHead(403, { 'Content-Type': 'text/plain' })
+          res.end('forbidden\n')
+          return
+        }
         res.writeHead(200, { 'Content-Type': 'text/plain' })
         res.end('ds-map daemon\n')
       })
@@ -53,6 +62,15 @@ export class DaemonServer {
           return
         }
         this.clients.add(ws)
+        // Отправить недавнюю историю только что подключившемуся клиенту,
+        // чтобы оно увидело сессию и уже произошедшие события.
+        for (const e of this.recent) {
+          try {
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(e))
+          } catch {
+            // клиент не готов — событие дойдёт пошироковещательной рассылке пока живо
+          }
+        }
         ws.on('close', () => this.clients.delete(ws))
         ws.on('error', () => this.clients.delete(ws))
       })
@@ -63,9 +81,9 @@ export class DaemonServer {
         const addr = this.server!.address()
         this.port = typeof addr === 'object' && addr ? addr.port : 0
         try {
-          fs.writeFileSync(PORT_FILE, String(this.port))
+          fs.writeFileSync(portPath(), String(this.port))
         } catch {
-          // игнорируем
+          // Тот же fail-open, что и с токеном.
         }
         resolve(this.port!)
       })
@@ -75,6 +93,8 @@ export class DaemonServer {
   }
 
   private broadcast(e: DsMapEvent): void {
+    this.recent.push(e)
+    if (this.recent.length > this.MAX_RECENT) this.recent = this.recent.slice(-this.MAX_RECENT)
     const msg = JSON.stringify(e)
     for (const ws of this.clients) {
       if (ws.readyState === WebSocket.OPEN) {
@@ -100,5 +120,7 @@ export class DaemonServer {
     this.clients.clear()
     this.wss?.close()
     this.server?.close()
+    // Между запусками не должно оставаться ни порта, ни токена (§12.4).
+    if (this.port !== null && this.token) clearEndpointFiles({ port: this.port, token: this.token })
   }
 }

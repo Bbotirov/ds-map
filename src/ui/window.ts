@@ -87,6 +87,9 @@ export class WindowWatcher extends EventEmitter {
         env: {
           ...process.env,
           DSMAP_PID_LIST: this.opts.pids.join(','),
+          // Наблюдатель обязан умереть вместе с панелью: если Electron убит
+          // снаружи, его powershell иначе крутится вечно сиротой.
+          DSMAP_OWNER_PID: String(process.pid),
           ...(this.opts.title ? { DSMAP_TITLE: this.opts.title } : {}),
           ...(this.opts.intervalMs ? { DSMAP_INTERVAL_MS: String(this.opts.intervalMs) } : {}),
         },
