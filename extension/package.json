@@ -1,0 +1,60 @@
+{
+  "name": "ds-map",
+  "publisher": "bbotirov",
+  "displayName": "ds-map — DeepSeek Harness radar",
+  "description": "A radar panel beside your agent chat: stations, route, errors and a real context ring. Event names only — never content.",
+  "version": "0.2.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Bbotirov/ds-map.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Visualization", "Other"],
+  "keywords": ["deepseek", "harness", "dsh", "agent", "radar", "privacy", "visualization"],
+  "icon": "images/icon.png",
+  "main": "./out/extension.js",
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "The extension launches a local harness process and a panel window."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "dsMap.start",
+        "category": "ds-map",
+        "title": "Start panel with harness"
+      },
+      {
+        "command": "dsMap.stop",
+        "category": "ds-map",
+        "title": "Stop panel (send Ctrl-C)"
+      },
+      {
+        "command": "dsMap.doctor",
+        "category": "ds-map",
+        "title": "Run diagnostics"
+      }
+    ],
+    "configuration": {
+      "title": "ds-map",
+      "properties": {
+        "dsMap.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to dist/cli.js. Leave empty to look in the open workspace, DSMAP_BIN and the global install."
+        },
+        "dsMap.harnessCommand": {
+          "type": "string",
+          "default": "dsh",
+          "description": "Harness command passed after `dsmap run --`. For example: dsh --profile web"
+        }
+      }
+    }
+  }
+}

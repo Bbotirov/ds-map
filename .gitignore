@@ -1,8 +1,13 @@
 node_modules/
 dist/
+build/
+extension/out/
 coverage/
 *.log
 .env
 .dsmap-config.json
 # Данные сессий DeepSeek Harness — никогда не коммитить (§12)
 .dsh/
+
+# Локальные настройки VS Code — генерируются прогоном тестов расширения
+.vscode/
