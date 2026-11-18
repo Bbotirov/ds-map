@@ -40,6 +40,33 @@ export const STATIONS: readonly Station[] = [
 const CONTEXT_R = CORE + 4
 const BEND = 0.4
 
+/**
+ * Иконки станций — геометрические path'ы в координатах ±9 вокруг центра узла
+ * (перенос из lot-map, MIT). Штриховка, не заливка: масштаб не зависит от radii.
+ */
+function ring(x: number, y: number, r: number): string {
+  return `M${x - r} ${y}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0`
+}
+
+export const STATION_ICONS: Record<Station, string> = {
+  you: `${ring(0, -3.6, 3.4)}M-6.5 8c0-4 3-6.2 6.5-6.2s6.5 2.2 6.5 6.2`,
+  model: 'M-5 -5h10v10h-10zM-2 -8.5v3.5M2 -8.5v3.5M-2 5v3.5M2 5v3.5M-8.5 -2h3.5M-8.5 2h3.5M5 -2h3.5M5 2h3.5',
+  memory: `M-5 4.5L0 -5L6 3.5M-5 4.5L6 3.5${ring(-5, 4.5, 2.1)}${ring(0, -5, 2.1)}${ring(6, 3.5, 2.1)}`,
+  files: 'M-5.5 -8h7.5l3.5 3.5v12.5h-11zM2 -8v3.5h3.5',
+  shell: 'M-7.5 -5l5 5l-5 5M0 6h7.5',
+  web: `${ring(0, 0, 7.8)}M-7.8 0h15.6M0 -7.8c-4.2 4.2 -4.2 11.4 0 15.6M0 -7.8c4.2 4.2 4.2 11.4 0 15.6`,
+  browser: 'M-8.5 -6.5h17v13h-17zM-8.5 -2.8h17M-6.3 -4.7h.1M-3.8 -4.7h.1',
+  agents: `M0 -4v3.5M0 -0.5L-6 4M0 -0.5L6 4${ring(0, -6, 2.1)}${ring(-6.5, 5.5, 2.1)}${ring(6.5, 5.5, 2.1)}`,
+  skills: 'M1.5 -8.5L-5.5 1h4.5l-1.5 7.5l7.5 -9.8h-4.5z',
+  hooks: `M2.5 -5.5v8a4.2 4.2 0 1 1 -8.4 0v-1.5${ring(2.5, -7.3, 1.8)}`,
+}
+
+const ICON = '<path d="%d" fill="none" stroke="%s" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>'
+
+function icon(station: Station, color: string): string {
+  return ICON.replace('%d', STATION_ICONS[station]).replace('%s', color)
+}
+
 export interface Pulse {
   station: Station
   dir: 'out' | 'back'
@@ -170,7 +197,7 @@ export function drawBase(state: State, setup: Setup): string {
   }
 
   for (let i = 0; i < STATIONS.length; i++) {
-    out.push(drawNodeBase(STATIONS[i], i, c, shift, setup.lang))
+    out.push(drawNodeBase(STATIONS[i], i, c, shift, setup.lang, state))
   }
 
   out.push(
@@ -235,17 +262,30 @@ function stationColors(station: Station, c: Palette, glowing: boolean): { fill: 
   return { fill: glowing ? c.active : c.node, stroke: c.line, hot: c.active }
 }
 
-function drawNodeBase(station: Station, index: number, c: Palette, shift: number, lang: Language): string {
+function drawNodeBase(station: Station, index: number, c: Palette, shift: number, lang: Language, state: State): string {
   const p = place(index, STATIONS.length, shift)
   const { stroke } = stationColors(station, c, false)
   const label = stationLabel(lang, station)
   return (
     `<g transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">` +
     `<circle r="${NODE}" fill="${c.node}" stroke="${stroke}" stroke-width="1.5"/>` +
+    icon(station, glyphColor(station, c, false, false, state.stationCounts.get(station) ?? 0)) +
     `<text x="0" y="${NODE + 14}" text-anchor="middle" font-size="10" fill="${c.label}" ` +
+    `paint-order="stroke" stroke="${c.background}" stroke-width="3.5" stroke-linejoin="round" ` +
     `font-family="system-ui, sans-serif">${esc(label)}</text>` +
     `</g>`
   )
+}
+
+/**
+ * Цвет иконки повторяет lot-map: ошибка — красная, активная — «горячая» пара
+ * станции, память со счётчиком — своя бирюзовая, всё остальное — приглушённая.
+ */
+function glyphColor(station: Station, c: Palette, glowing: boolean, alarm: boolean, count: number): string {
+  if (alarm) return c.error
+  if (glowing) return stationColors(station, c, true).hot
+  if (station === 'memory' && count > 0) return c.memory
+  return c.label
 }
 
 function drawStationFx(
@@ -271,6 +311,12 @@ function drawStationFx(
     const r = NODE + (reduced ? 0 : 6)
     el += `<circle r="${r}" fill="${fill}" opacity="0.5"/>`
   }
+
+  // Иконка поверх базового слоя: тот же path, но в цвете состояния.
+  el += icon(
+    station,
+    glyphColor(station, c, glowing, !!alarmAt, state.stationCounts.get(station) ?? 0),
+  )
 
   if (active) {
     const elapsed = now - active.startedAt
