@@ -1,6 +1,10 @@
-# M1 — разведка интеграции ds-map с DeepSeek Harness
+# Разведка и проверки интеграции ds-map с DeepSeek Harness
 
-Дата проверок: 17 ноября 2026. Цель — выбрать источник событий, прежде чем проектировать подключение. Секреты, содержимое сообщений, файлов и команд в этот отчёт не включены. Статус M1: **принят с оговорками** — live console feed подтверждён (события текут через шину в консоль), выбор подключения обоснован на уровне API + живой хвост сессионного store. Проверка scope Host-плагина и доставка событий до внешнего плагина требуют авторизованного доступа к GUI (сейчас 401) — оставлено на M2.
+Дата проверок: 17–18 ноября 2026. Секреты, содержимое сообщений, файлов и команд в отчёты не включены: фиксируются только имена событий, счётчики и код возврата.
+
+## M1 — разведка: выбор источника событий
+
+Дата: 17 ноября 2026. Цель — выбрать источник событий, прежде чем проектировать подключение. Статус M1: **принят с оговорками** — live console feed подтверждён (события текут через шину в консоль), выбор подключения обоснован на уровне API + живой хвост сессионного store. Проверка scope Host-плагина и доставка событий до внешнего плагина требуют авторизованного доступа к GUI (сейчас 401) — оставлено на M2.
 
 ## Результаты
 
@@ -103,3 +107,152 @@ RdpSaProxy.exe
 - Live console feed подтверждён для локального session store (хвост JSONL). Удалённый SSE endpoint не проверялся; отдельный терминальный эмулятор не идентифицирован.
 - Декларации API и статический код подтверждают интерфейсы установленного клиента. Доступность конкретного scope Host-плагина и доставка событий до внешнего плагина остаются интеграционной проверкой M2 (требуют авторизованного GUI, сейчас 401 Unauthorized).
 - Модельные session events могут содержать приватное содержимое. Будущий сборщик обязан извлекать только allowlisted метаданные; сам факт наличия event hook не разрешает сохранять payload целиком. В этом отчёте не выводились и не читались session payloads.
+
+---
+
+# M2–M8 — что проверено по-настоящему (18 ноября 2026)
+
+Статус: **принято**. Все проверки ниже выполнены командами на этой машине; в отчёт
+попадают только имена событий, счётчики и тексты проверок `doctor` — без содержимого.
+
+## Сборка, тесты, покрытие
+
+```powershell
+PS> pnpm typecheck     # tsc --noEmit && tsc -p extension --noEmit
+PS> pnpm lint          # eslint src test extension/src scripts/*.mjs
+PS> pnpm test
+ Test Files  17 passed (17)
+      Tests  258 passed (258)
+PS> pnpm exec vitest run --coverage   # порог 80% на src/core/**
+ All files  | % Stmts 97.81 | % Branch 88.51 | % Funcs 94.82 | % Lines 97.81
+```
+
+`vitest.config.ts` алиасит `vscode` на `test/mocks/vscode.ts`, поэтому код
+расширения тестируется без хоста; живой хост — отдельная проверка ниже.
+
+## Живые сессии dsh → карта
+
+Свежие `session.v4.jsonl` этого cwd прогнаны через настоящий `EventMapper`
+(скрипт читает только имена полей):
+
+| сессия | записей dsh | событий ds-map | станции |
+| --- | --- | --- | --- |
+| session-2fca9e07… | 25 | 7 | skills |
+| session-a0927fee… | 31 | 12 | skills, files |
+| session-b50003eb… | 40 | 20 | files, skills |
+| session-9b599287… | 43 | 21 | files, skills |
+| session-3e72edc9… | 52 | 21 | files, skills |
+
+Итого 81 событие. Типы записей, которые маппер встречает в реальности:
+`session`, `permission/preset`, `sandbox/mode`, `approval/policy`, `turn/start`,
+`turn/end`, `step/start`, `step/end`, `system/message`, `user/message`,
+`agent/inbox/spliced`, `assistant/message`, `assistant/attempt`, `llm/retry`,
+`llm/retry-started`, `request/header`, `request/context`, `tool/call`,
+`tool/result`, `session/title`, `session/title-llm-request`.
+Неизвестные типы маппер молча игнорирует — на `llm/retry*` и прочих карта не падает.
+
+## M8: одна команда поднимает всё и гасит всё
+
+Стек поднят `node dist/cli.js run -- dsh --profile headless "<промпт>"`
+(батник с `title`/`DSMAP_TITLE`), наблюдение `Get-CimInstance Win32_Process`:
+
+```
+t=12s (stack up): launcher=1 electron=4 harnessTree=3 watcher=1 portFile=True tokenFile=True
+t=42s:            launcher=0 electron=0 harnessTree=0 watcher=0 portFile=False tokenFile=False
+t=62s:            launcher=0 electron=0 harnessTree=0 watcher=0 portFile=False tokenFile=False
+t=77s (final):    launcher=0 electron=0 harnessTree=0 watcher=0 portFile=False tokenFile=False
+```
+
+Харнес завершился сам — лаунчер погасил панель, наблюдатель и сайдкара, файлы
+порта и токена удалены, сирот нет (`WindowsTerminal` с тестовым заголовком — 0).
+
+## Изоляция отказов (пункты §15 «убил панель / убил сайдкар»)
+
+Харнес — `powershell Start-Sleep 120` с уникальной меткой в командной строке,
+убийства — `taskkill /F` (панель деревом, лаунчер без `/T`, чтобы детей не трогать):
+
+```
+t=15s up:            launcher=1 panel=4 watcher=1 harness=1 port=True token=True
+t=19s panel killed:  launcher=1 panel=0 watcher=0 harness=1 port=True token=True
+t=23s sidecar killed:launcher=0 panel=0 watcher=0 harness=1 port=True token=True
+t=35s:               launcher=0 panel=0 watcher=0 harness=1 port=True token=True
+```
+
+- Панель убита насильно — харнес жив, а `window-watcher.ps1` умер вместе с
+  панелью (`watcher=0`): сироты-наблюдателя нет, он следит за `DSMAP_OWNER_PID`.
+- Лаунчер убит без `/T` — харнес жив ещё минимум 12 с; панель в этом сценарии
+  гаснет по молчанию порта (`launcher-watch`), а не по угаданному PID.
+- После `taskkill /F` лаунчера файлы порта/токена остаются (обработчик выхода не
+  успевает отработать) — это не тихая поломка, `doctor` её называет:
+  `✗ Сайдкар — порт 10501 из файла не отвечает — сайдкар убили без уборки,
+  удалите dsmap-port.txt и dsmap-token.txt или перезапустите dsmap run`.
+  После удаления файлов: `– Сайдкар — не запущен (нужен dsmap run)`.
+
+## Ctrl-C: где работает и почему нельзя было проверить иначе
+
+- В **терминале VS Code** (node-pty) настоящий байт `0x03` доходит до лаунчера, и
+  весь стек гаснет корректно — проверено живым прогоном расширения (ниже).
+- В **Windows Terminal / conhost** синтетические console events не доставляются
+  дочерним процессам. Проверено четырьмя независимыми способами:
+  `AttachConsole` + `GenerateConsoleCtrlEvent`, `GenerateConsoleCtrlEvent` в
+  собственной консоли, `SendKeys`+`AppActivate`, `WriteConsoleInput` на
+  `CONIN$` (возвращает `err=6`, неверный хэндл). Во всех случаях событие убивало
+  тот PowerShell, который его послал, и не доходило до `node`.
+  Это ограничение ОС, а не ds-map: тот же обработчик `SIGINT` подтверждён
+  терминалом VS Code и обычным завершением харнеса.
+
+## Расширение VS Code
+
+```powershell
+PS> pnpm package:extension
+ DONE  Packaged: …\ds-map\build\ds-map-0.2.0.vsix (8 files, 14.69 KB)
+PS> code --install-extension build\ds-map-0.2.0.vsix
+Extension 'ds-map-0.2.0.vsix' was successfully installed.
+```
+
+Прогон в настоящем хосте расширений:
+
+```powershell
+Code.exe --user-data-dir <пустой каталог> --disable-workspace-trust `
+  --extensionDevelopmentPath "<repo>\build\extension" `
+  --extensionTestsPath "<repo>\extension\test-runner\run.js" "<repo>"
+
+[extension-tests] активация, команды, start/stop, панель — ок
+```
+
+Тест проверяет: id `bbotirov.ds-map` найден и активировался, три команды
+зарегистрированы, дефолт `dsMap.harnessCommand` = `dsh`, `doctor` не бросает,
+`start` поднимает терминал `ds-map` и окно Electron, `stop` настоящим `Ctrl-C`
+гасит всё — терминал, окно и файлы порта/токена.
+
+Ловушки, найденные на этом пути (сто́ит знать при правках):
+- `vsce` под pnpm нельзя звать по имени пакета — бинарник резолвится через
+  `require.resolve('@vscode/vsce/package.json')` и поле `bin`.
+- `spawnSync(..., { shell: true })` ломается на пути `C:\Program Files` — без
+  shell команда работает.
+- VS Code принимает только модуль, экспортирующий функцию: `module.exports = run`
+  плюс `.run` и `.default`.
+- `workspace.getConfiguration()` — снимок: после `update()` нужно перечитать
+  конфиг, иначе `get()` отдаёт прежнее значение (из-за этого тест сначала
+  «проваливался на дефолте», хотя файла настроек уже не было).
+- Тест пишет настройки в `.vscode/settings.json` открытой папки, поэтому обязан
+  вернуть их к `undef` в `finally`; сам каталог `.vscode/` в `.gitignore`.
+
+## Приватность: как проверялась
+
+- Вывод всех проверок строился из имён полей и счётчиков; содержимое сообщений,
+  файлов и командных строк не читалось и не печаталось.
+- История коммитов просмотрена на предмет секретов и реального содержимого:
+  `"text":"…"`, `"path":"C:\…"`, `"cwd":"C:\…"` — только заглушки; совпадений по
+  `sk-…`, длинных hex/base64 нет; `.dsh/`, `dist/`, `build/`, `.env`,
+  `.dsmap-config.json`, `.vscode/` в `.gitignore`.
+- Журнала событий на диске нет: отладочные строки идут только в stdout лаунчера
+  и панели и содержат имена событий и тайминги.
+
+## Что осталось непроверенным
+
+- Host-плагин Cordis (`session/event`, `tools/pre-execute`) как источник событий —
+  end-to-end не подтверждён: требует авторизованного Web GUI. Выбор в пользу
+  хвоста `session.v4.jsonl` от этого не зависит и уже работает.
+- Точные суммы токенов контекста: кольцо строится на чтениях из записей сессии,
+  а не на оценке длины текста; при отсутствии данных кольцо молчит (fail-open).
