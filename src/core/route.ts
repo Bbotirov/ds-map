@@ -307,6 +307,9 @@ export class EventMapper {
       case 'request/context':
         return this.onRequestContext(data, ts)
 
+      case 'request/header':
+        return this.onRequestHeader(data, ts)
+
       case 'permission/preset':
         return [guardSet('permission', str(data.preset), ts)]
 
@@ -378,14 +381,24 @@ export class EventMapper {
   }
 
   private onRequestContext(data: Record<string, unknown>, ts: number): DsMapEvent[] {
+    const model = this.noteModel(str(data.provider), str(data.model), ts)
     const window = num(data.contextWindow)
-    if (window <= 0) return []
+    if (window <= 0) return model
     const before = this.context
     this.contextWindow = window
-    if (!this.model) this.model = str(data.model)
     // Окно известно, а заполнения ещё нет — допустима оценка по объёму.
     if (!this.context) this.context = estimateContext(this.chars, window)
-    return this.contextChanged(before, ts)
+    return [...model, ...this.contextChanged(before, ts)]
+  }
+
+  /**
+   * Заголовок запроса несёт ту же модель, что и `model/selection`, и приходит
+   * раньше него: без него шапка панели держала бы `unknown` до первого хода.
+   */
+  private onRequestHeader(data: Record<string, unknown>, ts: number): DsMapEvent[] {
+    const header = (data.header ?? {}) as Record<string, unknown>
+    const config = (header.config ?? {}) as Record<string, unknown>
+    return this.noteModel(str(config.provider), str(config.model), ts)
   }
 
   /**
@@ -403,14 +416,27 @@ export class EventMapper {
   }
 
   private onModelSelection(data: Record<string, unknown>, ts: number): DsMapEvent[] {
-    const provider = clean(str(data.provider))
     const rawModel = data.model
-    const name = clean(typeof rawModel === 'string' ? rawModel : modelFromObject(rawModel))
-    if (!name) return []
-    const full = provider && !name.includes('/') ? `${provider}/${name}` : name
+    return this.noteModel(
+      str(data.provider),
+      typeof rawModel === 'string' ? rawModel : modelFromObject(rawModel),
+      ts,
+    )
+  }
+
+  /**
+   * Имя модели помняется всегда, а событие о смене — только когда модель
+   * действительно сменилась. Пустое `from` означает «имя услышано впервые»,
+   * и UI рисует его как подпись сессии, а не как переключение.
+   */
+  private noteModel(provider: string, name: string, ts: number): DsMapEvent[] {
+    const n = clean(name)
+    if (!n) return []
+    const p = clean(provider)
+    const full = p && !n.includes('/') ? `${p}/${n}` : n
     const from = this.model
-    this.model = full
     if (from === full) return []
+    this.model = full
     return [modelSwitch(from, full, ts)]
   }
 
@@ -491,6 +517,9 @@ export class EventMapper {
     this.context = null
     this.contextWindow = 0
     this.chars = 0
+    // Имя модели относится к сессии: без сброса следующая сессия родилась бы
+    // с моделью предыдущей, а `model.switch` молчал бы там, где модель сменилась.
+    this.model = ''
   }
 }
 

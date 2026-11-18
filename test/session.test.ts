@@ -131,7 +131,9 @@ describe('SessionTailer', () => {
     tailer.start(cwd)
     await waitFor(() => typesOf(events).includes('answer'))
 
-    expect(typesOf(events).slice(0, 5)).toEqual(['session.start', 'turn.start', 'prompt', 'tool.start', 'tool.end'])
+    expect(typesOf(events).slice(0, 6)).toEqual([
+      'session.start', 'turn.start', 'model.switch', 'prompt', 'tool.start', 'tool.end',
+    ])
     const start = events.find((e) => e.t === 'tool.start')
     const end = events.find((e) => e.t === 'tool.end')
     expect(start).toMatchObject({ station: 'files', label: 'src/app.ts' })

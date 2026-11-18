@@ -69,13 +69,33 @@ describe('реальные типы записей dsh', () => {
   it('request/context и usage двигают кольцо контекста отдельным событием', () => {
     const mapper = new EventMapper()
     // Окно известно, а заполнять ещё нечего: кольцо обязано молчать, а не врать нулём.
-    expect(mapper.map(rec('request/context', { provider: 'nvidia', model: 'glm-4.7', contextWindow: 128_000 }))).toEqual([])
+    // Модель при этом названа — и это первое её имя, а не переключение.
+    expect(mapper.map(rec('request/context', { provider: 'nvidia', model: 'glm-4.7', contextWindow: 128_000 })))
+      .toEqual([{ v: 1, t: 'model.switch', ts: 1_000, from: '', to: 'nvidia/glm-4.7' }])
     const answer = mapper.map(rec('assistant/message', {
       turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(40) }] },
       usage: { inputTokens: 3, outputTokens: 19, totalTokens: 15_651, cacheReadTokens: 15_629 },
     }))
     const update = answer.find(isContextUpdate)
     expect(update?.used).toBe(15_632)
+  })
+
+  it('request/header называет модель раньше, чем дойдёт model/selection', () => {
+    const mapper = new EventMapper()
+    const evt = first(mapper, rec('request/header', {
+      reason: 'initial', header: { config: { provider: 'nvidia', model: 'glm-4.7', maxTokens: 32_000 }, tools: [] },
+    }))
+    expect(evt).toMatchObject({ t: 'model.switch', to: 'nvidia/glm-4.7' })
+    // То же имя повторно не плодит событий.
+    expect(mapper.map(rec('request/header', { header: { config: { provider: 'nvidia', model: 'glm-4.7' } } }))).toEqual([])
+  })
+
+  it('сессия не наследует модель от предыдущей сессии', () => {
+    const mapper = new EventMapper()
+    mapper.map(rec('request/context', { provider: 'nvidia', model: 'glm-4.7', contextWindow: 128_000 }))
+    mapper.map(rec('session', {}, { id: 's2', cwd: 'C:\\work\\two' }))
+    const evt = first(mapper, rec('request/context', { provider: 'kilo', model: 'gpt-6-luna', contextWindow: 128_000 }))
+    expect(evt).toMatchObject({ t: 'model.switch', from: '', to: 'kilo/gpt-6-luna' })
   })
 
   it('тот же usage дважды не плодит событий контекста', () => {
@@ -107,6 +127,25 @@ describe('реальные типы записей dsh', () => {
       id: 's1', cwd: 'C:\\Users\\user\\Desktop\\work', createdAt: 1,
     }))
     expect(evt).toMatchObject({ t: 'session.start', cwd: 'work', session: 's1' })
+  })
+
+  it('model/selection с моделью объектом даёт полное имя', () => {
+    const evt = first(new EventMapper(), rec('model/selection', {
+      provider: 'nvidia', model: { id: 'glm-4.7', name: 'GLM', reasoning: true },
+    }))
+    expect(evt).toMatchObject({ t: 'model.switch', to: 'nvidia/glm-4.7' })
+  })
+
+  it('model/selection с пустой моделью не порождает переключения', () => {
+    const mapper = new EventMapper()
+    mapper.map(rec('model/selection', { provider: 'nvidia', model: 'a' }))
+    expect(mapper.map(rec('model/selection', { provider: 'nvidia', model: 0 }))).toEqual([])
+  })
+
+  it('tool/call без callId получает свой id: иначе вызов нельзя закрыть', () => {
+    const evt = first(new EventMapper(), rec('tool/call', { callId: '', name: 'read', arguments: '{"file_path":"a.md"}', turn: 1, step: 1 }))
+    expect(evt).toMatchObject({ t: 'tool.start', label: 'a.md' })
+    expect((evt as { id: string }).id).toMatch(/^call_\d+$/)
   })
 
   it('ни одна сырая строка лога не уходит в UI', () => {
