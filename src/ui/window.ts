@@ -22,8 +22,20 @@ export interface WindowBounds {
   height: number
 }
 
+/**
+ * Откуда наблюдатель взял окно, в порядке его доверия: точный hwnd консоли,
+ * окно самого харнеса или его потомков, окно ближайшего предка (терминал —
+ * родитель шелла, а не потомок, поэтому дерева PID его не видят) и, если
+ * ничего не нашлось, подстрока заголовка.
+ */
+export type AnchorSource = 'hwnd' | 'tree' | 'parent' | 'title'
+
+const ANCHOR_SOURCES: readonly string[] = ['hwnd', 'tree', 'parent', 'title']
+/** Имя образа якоря попадает в лог — пропускаем только его легальный алфавит (§12). */
+const PROC_NAME_RE = /^[A-Za-z0-9 ._\-()[\]{}]{1,40}$/
+
 export type WatcherState =
-  | { kind: 'bounds'; bounds: WindowBounds }
+  | { kind: 'bounds'; bounds: WindowBounds; anchor?: AnchorSource; proc?: string }
   | { kind: 'minimized' }
   | { kind: 'pending' }
   | { kind: 'gone' }
@@ -44,7 +56,15 @@ export function parseWatcherLine(line: string): WatcherState | null {
     case 'bounds': {
       const n = [o.x, o.y, o.width, o.height]
       if (!n.every((v) => typeof v === 'number' && Number.isFinite(v))) return null
-      return { kind: 'bounds', bounds: { x: o.x as number, y: o.y as number, width: o.width as number, height: o.height as number } }
+      const parsed: Extract<WatcherState, { kind: 'bounds' }> = {
+        kind: 'bounds',
+        bounds: { x: o.x as number, y: o.y as number, width: o.width as number, height: o.height as number },
+      }
+      // anchor — только диагностика, поэтому он необязателен: строка от старого
+      // наблюдателя или неизвестное значение не имеют права терять геометрию.
+      if (typeof o.anchor === 'string' && ANCHOR_SOURCES.includes(o.anchor)) parsed.anchor = o.anchor as AnchorSource
+      if (typeof o.proc === 'string' && PROC_NAME_RE.test(o.proc)) parsed.proc = o.proc
+      return parsed
     }
     case 'minimized':
       return { kind: 'minimized' }

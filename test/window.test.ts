@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { computePanelBounds, parseWatcherLine, type WindowBounds } from '../src/ui/window.js'
+import { computePanelBounds, parseWatcherLine, type WatcherState, type WindowBounds } from '../src/ui/window.js'
 
 const AREA = { x: 0, y: 0, width: 1536, height: 816 }
 
 function harness(x: number, y: number, width: number, height: number): WindowBounds {
   return { x, y, width, height }
+}
+
+/** Разбор ради геометрии: всё остальное в тесте — diagnostics-поля того же кадра. */
+function boundsOf(line: string): Extract<WatcherState, { kind: 'bounds' }> {
+  const state = parseWatcherLine(line)
+  if (!state || state.kind !== 'bounds') throw new Error(`не bounds: ${line}`)
+  return state
 }
 
 describe('parseWatcherLine', () => {
@@ -32,6 +39,42 @@ describe('parseWatcherLine', () => {
   it('не принимает NaN и строки вместо чисел', () => {
     expect(parseWatcherLine('{"state":"bounds","x":"12","y":2,"width":3,"height":4}')).toBeNull()
     expect(parseWatcherLine('{"state":"bounds","x":null,"y":2,"width":3,"height":4}')).toBeNull()
+  })
+
+  it('носит источник якоря вместе с геометрией', () => {
+    expect(parseWatcherLine('{"state":"bounds","x":1,"y":2,"width":300,"height":400,"anchor":"parent","proc":"Code.exe"}')).toEqual({
+      kind: 'bounds',
+      bounds: { x: 1, y: 2, width: 300, height: 400 },
+      anchor: 'parent',
+      proc: 'Code.exe',
+    })
+    for (const source of ['hwnd', 'tree', 'parent', 'title'] as const) {
+      expect(boundsOf(`{"state":"bounds","x":0,"y":0,"width":10,"height":10,"anchor":"${source}"}`).anchor).toBe(source)
+    }
+  })
+
+  it('строка без anchor разбирается ровно как раньше', () => {
+    expect(parseWatcherLine('{"state":"bounds","x":120,"y":80,"width":700,"height":500}')).toStrictEqual({
+      kind: 'bounds',
+      bounds: { x: 120, y: 80, width: 700, height: 500 },
+    })
+    expect(boundsOf('{"state":"bounds","x":1,"y":1,"width":2,"height":3}').anchor).toBeUndefined()
+  })
+
+  it('неизвестный anchor не отменяет геометрию', () => {
+    expect(parseWatcherLine('{"state":"bounds","x":5,"y":6,"width":700,"height":500,"anchor":"sidebar"}')).toStrictEqual({
+      kind: 'bounds',
+      bounds: { x: 5, y: 6, width: 700, height: 500 },
+    })
+    expect(boundsOf('{"state":"bounds","x":5,"y":6,"width":700,"height":500,"anchor":42}').anchor).toBeUndefined()
+  })
+
+  it('в proc не проходит ничего, кроме имени образа', () => {
+    const line = (proc: string) => `{"state":"bounds","x":1,"y":1,"width":9,"height":9,"anchor":"parent","proc":"${proc}"}`
+    expect(boundsOf(line('C:\\\\x\\\\Code.exe')).proc).toBeUndefined()
+    expect(boundsOf(line('ok\\\\u2028ok')).proc).toBeUndefined()
+    // Выбросив proc, геометрию терять нельзя: она единственная двигает панель.
+    expect(boundsOf(line('')).bounds).toEqual({ x: 1, y: 1, width: 9, height: 9 })
   })
 })
 

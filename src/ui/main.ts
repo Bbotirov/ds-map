@@ -28,6 +28,8 @@ let stopLauncherWatch: (() => void) | null = null
 /** Panel скрыт, потому что свёрнуто окно харнеса — не трогать show/hide вручную. */
 let hiddenWithHarness = false
 let docked = false
+/** Последний напечатанный источник якоря: печать нужна на смену, а не на каждый тик. */
+let anchorLabel = ''
 
 // Аргументы — только для ручного запуска панели (`electron dist/ui/main.js --port=…`).
 // В нормальном режиме порт и токен через командную строку не передаются: в argv
@@ -194,11 +196,20 @@ function applyState(state: WatcherState): void {
     return
   }
   if (state.kind === 'pending') {
+    anchorLabel = ''
     if (!docked) console.log('[ds-map] окно харнеса не найдено — панель у правого края экрана')
     docked = true
     return
   }
   docked = true
+  // Что стало якорем — видно только по этой строке: без неё пользователь `dsmap run`
+  // видит панель не у терминала и не понимает, что панель цепляла не то окно.
+  // Печатается источник и имя образа якоря: заголовки окон и командные строки §12 запрещает.
+  const label = state.anchor ? `${state.anchor}${state.proc ? ` (${state.proc})` : ''}` : 'неизвестен'
+  if (label !== anchorLabel) {
+    anchorLabel = label
+    console.log(`[ds-map] окно-якорь: ${label}`)
+  }
   if (hiddenWithHarness) {
     hiddenWithHarness = false
     panel?.showInactive()
