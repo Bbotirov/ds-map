@@ -33,6 +33,12 @@ launches it. It looks for `dist/cli.js` in this order:
 
 If nothing is found, the extension tells you instead of guessing.
 
+Put both settings in **User** scope to get the commands in every window; a
+relative `dsMap.cliPath` (e.g. `${workspaceFolder}/dist/cli.js`) only resolves
+while the ds-map project itself is open. `dsMap.harnessCommand` should use a
+session profile such as `dsh --profile web` — with `--profile headless` the
+harness finishes one turn and exits, and the panel closes with it by design.
+
 ## Settings
 
 | Setting | Default | Meaning |
