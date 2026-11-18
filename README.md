@@ -83,11 +83,11 @@ node "C:\путь\к\ds-map\dist\cli.js" run -- dsh --profile headless %*
 индикатор в статус-баре и настройки `dsMap.cliPath` / `dsMap.harnessCommand`.
 
 ```bash
-pnpm package:extension            # build/ds-map-<version>.vsix
-code --install-extension build/ds-map-0.2.0.vsix
+pnpm package:extension                          # build/ds-map-<version>.vsix
+code --install-extension build/ds-map-0.2.1.vsix
 ```
 
-Готовый `.vsix` лежит в [релизе v0.2.0](https://github.com/Bbotirov/ds-map/releases/tag/v0.2.0).
+Готовый `.vsix` лежит в [последнем релизе](https://github.com/Bbotirov/ds-map/releases/latest).
 В Marketplace расширение не опубликовано: для этого нужны аккаунт издателя и PAT —
 `pnpm exec vsce publish` из собранного каталога (`build/extension`).
 

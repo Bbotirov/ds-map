@@ -1,6 +1,6 @@
 {
   "name": "ds-map",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Живая карта работы агента рядом с чатом — вдохновлено lot-map (MIT)",
   "bin": {
     "dsmap": "dist/cli.js"

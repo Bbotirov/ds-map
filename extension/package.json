@@ -3,7 +3,7 @@
   "publisher": "bbotirov",
   "displayName": "ds-map — DeepSeek Harness radar",
   "description": "A radar panel beside your agent chat: stations, route, errors and a real context ring. Event names only — never content.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "MIT",
   "repository": {
     "type": "git",
