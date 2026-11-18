@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { Feed, MAX_ITEMS, TRUNCATE_CHARS, formatMs, statusOf } from '../src/ui/renderer/feed.js'
+import { Feed, DETAIL_CHARS, MAX_ITEMS, TRUNCATE_CHARS, formatMs, statusOf } from '../src/ui/renderer/feed.js'
 import type { FeedEntry } from '../src/ui/renderer/feed.js'
 
 const LONG_LABEL = 'src/ui/renderer/some-deeply-nested-module-name.ts'
@@ -56,7 +56,7 @@ describe('Feed', () => {
   it('повтор id закрытого ряда не оживляет прошлую строку', () => {
     const f = openCall('compaction', 'model', '', NOW)
     f.complete('compaction', 'ok', 100)
-    f.add({ id: 'compaction', station: 'model', key: 'compactionLabel', status: 'active', ts: NOW + 1 })
+    f.add({ id: 'compaction', station: 'model', key: 'phraseCompaction', status: 'active', ts: NOW + 1 })
     expect(f.getItems()).toHaveLength(2)
     expect(f.getItems()[0].status).toBe('active')
     expect(f.getItems()[1].status).toBe('done')
@@ -100,7 +100,7 @@ describe('Feed', () => {
   it('служебные ряды не сворачиваются, даже у одной станции', () => {
     const f = new Feed()
     f.add({ station: 'you', key: 'sessionLabel', status: 'done', ts: 1 })
-    f.add({ station: 'you', key: 'promptChars', vars: { n: 12 }, status: 'done', ts: 2 })
+    f.add({ station: 'you', key: 'phrasePrompt', vars: { n: 12 }, status: 'done', ts: 2 })
     expect(f.getItems()).toHaveLength(2)
   })
 
@@ -167,7 +167,11 @@ describe('Feed', () => {
       expect(html).toContain('data-toggle="a"')
       expect(html).toContain('aria-expanded="false"')
       expect(html).toContain('Развернуть строку')
-      expect(html).toContain('title="' + LONG_LABEL + '"')
+      // Подробность не длиннее потолка имён: сырой строки в DOM не будет.
+      const capped = LONG_LABEL.slice(0, DETAIL_CHARS - 1) + '…'
+      expect(capped.length).toBe(DETAIL_CHARS)
+      expect(html).toContain('title="' + capped + '"')
+      expect(html).not.toContain(LONG_LABEL)
     })
 
     it('короткую метку раскрывать не нужно', () => {
@@ -233,10 +237,78 @@ describe('Feed', () => {
 
   it('переводит служебные ряды при смене языка', () => {
     const f = new Feed()
-    f.add({ station: 'you', key: 'promptChars', vars: { n: 214 }, status: 'done', ts: 1 })
-    expect(f.render('ru')).toContain('Запрос · 214 симв.')
-    expect(f.render('en')).toContain('Prompt · 214 chars')
+    f.add({ station: 'you', key: 'phrasePrompt', vars: { n: 214 }, status: 'done', ts: 1 })
+    expect(f.render('ru')).toContain('ты написал · 214 симв.')
+    expect(f.render('en')).toContain('you wrote · 214 chars')
     expect(f.render('en')).toContain('You')
+  })
+
+  describe('слой фраз', () => {
+    it('фраза стоит на месте метки, метка — подробностью справа', () => {
+      const f = new Feed()
+      f.add({ id: 'a', station: 'files', key: 'phraseReadFile', label: 'src/app.ts', status: 'done', mergeable: true, ts: 1 })
+      expect(f.render('ru')).toContain('чтение файла · src/app.ts')
+      expect(f.render('en')).toContain('reading a file · src/app.ts')
+      // Пять колонок — контракт с сеткой index.html: фраза не добавляет span.
+      expect(f.render('ru').match(/<span|<button/g)?.length).toBe(5)
+    })
+
+    it('ряд без подробности — одна фраза', () => {
+      const f = new Feed()
+      f.add({ station: 'model', key: 'phraseThink', status: 'done', ms: 3_200, ts: 1 })
+      const html = f.render('ru')
+      expect(html).toContain('<span class="label" title="размышление">размышление</span>')
+      expect(html).toContain('3.2s')
+      expect(f.render('en')).toContain('thinking')
+    })
+
+    it('новые типы событий читаются фразами в обоих языках', () => {
+      const f = new Feed()
+      f.add({ station: 'you', key: 'phraseTurnStart', status: 'active', ts: 1 })
+      f.add({ station: 'model', key: 'phraseStep', status: 'done', mergeable: true, ts: 2 })
+      f.add({ station: 'model', key: 'phraseThink', status: 'done', ms: 1_500, ts: 3 })
+      f.add({ station: 'model', key: 'phraseRetry', label: '2/5', status: 'error', ts: 4 })
+      f.add({ station: 'hooks', key: 'phraseGuardPermission', label: 'standard', status: 'done', ts: 5 })
+      f.add({ station: 'agents', key: 'phraseAgentMsg', vars: { n: 2 }, status: 'done', ts: 6 })
+      f.add({ station: 'model', key: 'phraseContext', status: 'done', mergeable: true, ts: 7 })
+      const ru = f.render('ru')
+      const en = f.render('en')
+      for (const phrase of ['ход начат', 'шаг модели', 'размышление', 'повтор запроса · 2/5', 'пресет разрешений · standard', 'входящее от агента · 2', 'контекст']) {
+        expect(ru).toContain(phrase)
+      }
+      for (const phrase of ['turn started', 'model step', 'thinking', 'retrying request · 2/5', 'permission preset · standard', 'message from agent · 2', 'context']) {
+        expect(en).toContain(phrase)
+      }
+      // Ключи i18n не протекают в разметку: `t` отдаёт их дословно при промахе.
+      for (const key of ['phraseTurnStart', 'phraseStep', 'phraseRetry', 'phraseGuardPermission', 'phraseAgentMsg']) {
+        expect(ru).not.toContain(key)
+        expect(en).not.toContain(key)
+      }
+    })
+
+    it('фразы с подстановками не оставляют `{n}` в разметке', () => {
+      const f = new Feed()
+      f.add({ station: 'agents', key: 'phraseAgentMsg', vars: { n: 3 }, status: 'done', ts: 1 })
+      expect(f.render('ru')).toContain('входящее от агента · 3')
+      expect(f.render('ru')).not.toContain('{n}')
+    })
+
+    it('разные рода работ одной станции не сливаются', () => {
+      const f = new Feed()
+      f.add({ id: 'a', station: 'files', key: 'phraseReadFile', label: 'a.ts', status: 'done', mergeable: true, ts: 1 })
+      f.add({ id: 'b', station: 'files', key: 'phraseSearchText', label: 'grep', status: 'done', mergeable: true, ts: 2 })
+      expect(f.getItems()).toHaveLength(2)
+    })
+
+    it('одинаковые ряды модели сливаются в +N', () => {
+      const f = new Feed()
+      f.add({ id: 'a', station: 'model', key: 'phraseStep', status: 'done', mergeable: true, ts: 1 })
+      f.add({ id: 'b', station: 'model', key: 'phraseStep', status: 'done', mergeable: true, ts: 2 })
+      f.add({ id: 'c', station: 'model', key: 'phraseStep', status: 'done', mergeable: true, ts: 3 })
+      expect(f.getItems()).toHaveLength(1)
+      expect(f.getItems()[0].count).toBe(3)
+      expect(f.render('ru')).toContain('шаг модели +3')
+    })
   })
 
   it('экранирует метку: события идут из внешнего источника', () => {

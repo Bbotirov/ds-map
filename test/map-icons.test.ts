@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { Station } from '../src/core/events.js'
 import { createState, drawMap, STATIONS, STATION_ICONS, type Setup, type State } from '../src/ui/renderer/map.js'
 
-const setup: Setup = { theme: 'dark', layout: 'you-top', motion: 'full', lang: 'ru' }
+const setup: Setup = { theme: 'dark', layout: 'you-top', motion: 'full', lang: 'ru', counters: false }
 // Дальний момент времени: переключение модели (SWITCH_MS) уже не подсвечено.
 const NOW = 10_000_000
 

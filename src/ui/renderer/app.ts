@@ -6,19 +6,26 @@
  * при смене счётчиков станций, эффекты — на кадр. rAF стоит на потолке
  * 30 fps и гаснет, когда анимировать нечего (§11 «Производительность»).
  * Лента печатается только когда изменились её собственные данные.
+ *
+ * `пауза` не останавливает rAF и статус соединения: она только перекрывает
+ * вход событиям (см. `ingest`), чтобы панель осталась на последнем кадре.
  */
 
 import type { ContextReading, Station, ToolStatus } from '../../core/events.js'
-import { t, type Language } from '../i18n.js'
+import { guardPhraseKey, phraseKey, t, type Language } from '../i18n.js'
 import { Feed, statusOf } from './feed.js'
 import {
   baseKey,
   createState,
+  contextRatio,
+  contextSummary,
   drawBase,
   drawEffects,
   drawSkeleton,
+  FLASH_MS,
   isAnimating,
   PULSE_MS,
+  RETRY_MS,
   STATIONS,
   structureKey,
   TRAIL_FADE_MS,
@@ -68,9 +75,15 @@ export interface UiModel {
   feed: Feed
   /** Открытые вызовы и фоновые работы: `id` события → что закрывать. */
   open: Map<string, OpenActivity>
-  /** Строка уплотнения контекста: `id` открытого ряда, если уплотнение идёт. */
+  /** Строка сжатия контекста: `id` открытого ряда, если сжатие идёт. */
   openCompaction: string | null
   seq: number
+  /** `пауза`: вход событий перекрыт, панель показывает последний кадр. */
+  paused: boolean
+  /** Модель текущей сессии — для шапки. */
+  modelName: string
+  /** Папка текущей сессии (имя, не путь) — для шапки. */
+  sessionDir: string
 }
 
 const STATION_SET: ReadonlySet<string> = new Set<string>(STATIONS)
@@ -78,11 +91,14 @@ const STATION_SET: ReadonlySet<string> = new Set<string>(STATIONS)
 export function createModel(lang: Language = 'ru'): UiModel {
   return {
     state: createState(),
-    setup: { theme: 'dark', layout: 'you-top', motion: 'full', lang },
+    setup: { theme: 'dark', layout: 'you-top', motion: 'full', lang, counters: true },
     feed: new Feed(),
     open: new Map(),
     openCompaction: null,
     seq: 0,
+    paused: false,
+    modelName: '',
+    sessionDir: '',
   }
 }
 
@@ -124,7 +140,10 @@ function contextOfEvent(ev: LooseEvent): ContextReading | null {
   return contextOf(read.used, read.max, read.estimated)
 }
 
-/** Метка вызова: label из события, иначе имя инструмента, иначе станция. */
+/**
+ * Подробность ряда: метка вызова из `core/route.ts` — имя файла, хост или
+ * имя команды. Переводу не подлежит: это имена, а не текст интерфейса.
+ */
 function labelOf(ev: LooseEvent, station: Station): string {
   return str(ev.label) || str(ev.name) || station
 }
@@ -172,6 +191,10 @@ export function prune(state: State, now: number): void {
   if (state.pulses.length > 0) {
     state.pulses = state.pulses.filter((p) => now - p.startedAt < PULSE_MS)
   }
+  for (const [station, at] of state.flash) {
+    if (now - at >= FLASH_MS) state.flash.delete(station)
+  }
+  if (state.retry && now - state.retryAt >= RETRY_MS) state.retry = null
   const cutoff = now - (TRAIL_HOLD_MS + TRAIL_FADE_MS)
   if (state.trail.length > 0 && state.trail[0].ts < cutoff) {
     state.trail = state.trail.filter((entry) => entry.ts >= cutoff)
@@ -179,8 +202,23 @@ export function prune(state: State, now: number): void {
 }
 
 /**
+ * Вход событий: `пауза` перекрывает его целиком. Возвращает `false`, когда
+ * событие проигнорировано, — панель при этом остаётся на последнем кадре,
+ * а не «дочитывает» историю после снятия паузы.
+ */
+export function ingest(model: UiModel, raw: unknown, now: number): boolean {
+  if (model.paused) return false
+  applyEvent(model, raw, now)
+  return true
+}
+
+/**
  * Одно событие → состояние карты и ленты. Неизвестные `t` игнорируются,
  * битые поля не роняют панель: всё читается через проверенные ассессоры.
+ *
+ * Ряд ленты всегда несёт локализованную фразу: identifier из события
+ * (`name`, `label`) остаётся только подробностью справа — панель обязана
+ * читаться как «что произошло», а не как список имён из лога харнеса.
  */
 export function applyEvent(model: UiModel, raw: unknown, now: number): void {
   if (!raw || typeof raw !== 'object') return
@@ -192,13 +230,27 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
     case 'session.start': {
       model.open.clear()
       model.openCompaction = null
+      model.state.flash.clear()
       state.active.clear()
       state.alarms.clear()
       state.context = null
       state.trail = []
+      state.retry = null
       state.rippleAt = now
+      model.modelName = str(ev.model)
+      model.sessionDir = str(ev.cwd)
       pushTrail(model, 'you', now)
       model.feed.add({ station: 'you', key: 'sessionLabel', status: 'done', ts: now })
+      break
+    }
+
+    case 'turn.start': {
+      // Ход начат: пользователь уже сказал, модель ещё молчит. Ряд живёт до
+      // ответа — `answer` погасит его через `settle`, как незакрытый вызов.
+      state.alarms.clear()
+      state.rippleAt = now
+      pushTrail(model, 'you', now)
+      model.feed.add({ station: 'you', key: 'phraseTurnStart', status: 'active', ts: now })
       break
     }
 
@@ -209,7 +261,7 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
       pushTrail(model, 'you', now)
       model.feed.add({
         station: 'you',
-        key: 'promptChars',
+        key: 'phrasePrompt',
         vars: { n: num(ev.chars) ?? 0 },
         status: 'done',
         ts: now,
@@ -220,12 +272,44 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
     case 'model.step': {
       const context = contextOfEvent(ev)
       if (context) state.context = context
+      // Шагов на ход много, поэтому ряды сливаются в `шаг модели +N`.
+      model.feed.add({ station: 'model', key: 'phraseStep', status: 'done', mergeable: true, ts: now })
+      break
+    }
+
+    case 'model.think': {
+      // `ms` — время модели над шагом, оно уходит в колонку длительности.
+      pushPulse(state, 'model', 'out', 'ok', now)
+      model.feed.add({
+        station: 'model',
+        key: 'phraseThink',
+        status: 'done',
+        ms: num(ev.ms),
+        ts: now,
+      })
+      break
+    }
+
+    case 'model.retry': {
+      const attempt = num(ev.attempt) ?? 0
+      const total = num(ev.of) ?? 0
+      state.retry = { attempt, of: total }
+      state.retryAt = now
+      pushPulse(state, 'model', 'out', 'err', now)
+      model.feed.add({
+        station: 'model',
+        key: 'phraseRetry',
+        label: total > 0 ? `${attempt}/${total}` : attempt > 0 ? String(attempt) : '',
+        status: 'error',
+        ts: now,
+      })
       break
     }
 
     case 'context.update': {
       const context = contextOf(ev.used, ev.max, ev.estimated)
       if (context) state.context = context
+      model.feed.add({ station: 'model', key: 'phraseContext', status: 'done', mergeable: true, ts: now })
       break
     }
 
@@ -233,6 +317,7 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
       const station = stationOf(ev.station)
       if (!station) break
       const id = str(ev.id) || `call_${model.seq++}`
+      const name = str(ev.name)
       model.open.set(id, { station, ts: now, background: false })
       countStation(state, station)
       pushPulse(state, station, 'out', 'ok', now)
@@ -241,6 +326,7 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
       model.feed.add({
         id,
         station,
+        key: phraseKey(name, station),
         label: labelOf(ev, station),
         status: 'active',
         mergeable: true,
@@ -265,6 +351,7 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
         // Конец без начала (обрывок истории): строку всё равно надо показать.
         model.feed.add({
           station,
+          key: phraseKey(str(ev.name), station),
           label: labelOf(ev, station),
           status: statusOf(outcome),
           ms,
@@ -301,12 +388,45 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
       const from = str(ev.from)
       const to = str(ev.to)
       state.switchAt = now
+      if (to) model.modelName = to
       model.feed.add({
         id: `switch_${model.seq++}`,
         station: 'model',
-        label: from || to ? `${from || '—'} → ${to || '—'}` : '',
-        key: from || to ? undefined : 'modelSwitchLabel',
+        // Пустое `from` — харнес назвал модель впервые, переключения не было:
+        // ряд читается как подпись сессии, а не как «— → glm-4.7».
+        label: to && from ? `${from} → ${to}` : to || from,
+        key: 'phraseModelSwitch',
         status: 'switch',
+        ts: now,
+      })
+      break
+    }
+
+    case 'guard.set': {
+      // Смена правила доступа — станция `hooks`. Событие мгновенное,
+      // открытого вызова нет, поэтому горит оно вспышкой.
+      state.flash.set('hooks', now)
+      pushPulse(state, 'hooks', 'out', 'ok', now)
+      pushTrail(model, 'hooks', now)
+      model.feed.add({
+        station: 'hooks',
+        key: guardPhraseKey(str(ev.kind)),
+        // `label` — имя правила из конфига харнеса: `пресет разрешений · standard`.
+        label: str(ev.label),
+        status: 'done',
+        ts: now,
+      })
+      break
+    }
+
+    case 'agent.msg': {
+      state.flash.set('agents', now)
+      pushPulse(state, 'agents', 'out', 'ok', now)
+      model.feed.add({
+        station: 'agents',
+        key: 'phraseAgentMsg',
+        vars: { n: num(ev.inserted) ?? 0 },
+        status: 'done',
         ts: now,
       })
       break
@@ -354,7 +474,7 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
         model.openCompaction = id
         acquire(state, 'model', now, false)
         pushPulse(state, 'model', 'out', 'ok', now)
-        model.feed.add({ id, station: 'model', key: 'compactionLabel', status: 'active', ts: now })
+        model.feed.add({ id, station: 'model', key: 'phraseCompaction', status: 'active', ts: now })
       } else {
         const id = model.openCompaction
         model.openCompaction = null
@@ -362,7 +482,7 @@ export function applyEvent(model: UiModel, raw: unknown, now: number): void {
         pushPulse(state, 'model', 'back', 'ok', now)
         const ms = num(ev.ms)
         if (!id || !model.feed.complete(id, 'ok', ms)) {
-          model.feed.add({ station: 'model', key: 'compactionLabel', status: 'done', ms, ts: now })
+          model.feed.add({ station: 'model', key: 'phraseCompaction', status: 'done', ms, ts: now })
         }
       }
       break
@@ -382,12 +502,17 @@ let mapEl: HTMLElement | null = null
 let feedNowEl: HTMLElement | null = null
 let feedListEl: HTMLElement | null = null
 let statusEl: HTMLElement | null = null
+let headerModelEl: HTMLElement | null = null
+let headerDirEl: HTMLElement | null = null
+let headerBarEl: HTMLElement | null = null
+let headerContextEl: HTMLElement | null = null
 let layerBase: Element | null = null
 let layerFx: Element | null = null
 let mountedStructure = ''
 let mountedBase = ''
 let mountedFeedRev = -1
 let mountedFeedLang: Language | null = null
+let mountedContextText = ''
 let rafId: number | null = null
 let lastFrameAt = 0
 let lastNowTick = 0
@@ -403,7 +528,16 @@ export function init(): void {
   const themeBtn = document.getElementById('theme-btn')
   const langBtn = document.getElementById('lang-btn')
   const motionBtn = document.getElementById('motion-btn')
-  if (!map || !feedNow || !feedList || !status || !themeBtn || !langBtn || !motionBtn) {
+  const pauseBtn = document.getElementById('pause-btn')
+  const countersBtn = document.getElementById('counters-btn')
+  const headerModel = document.getElementById('header-model')
+  const headerDir = document.getElementById('header-dir')
+  const headerBar = document.getElementById('header-bar-fill')
+  const headerContext = document.getElementById('header-context')
+  if (
+    !map || !feedNow || !feedList || !status || !themeBtn || !langBtn || !motionBtn ||
+    !pauseBtn || !countersBtn || !headerModel || !headerDir || !headerBar || !headerContext
+  ) {
     // Диагностика разработчику, не строка интерфейса: её нет в таблицах i18n.
     console.error('[ds-map] index.html is missing a mount point — panel not started')
     return
@@ -412,6 +546,10 @@ export function init(): void {
   feedNowEl = feedNow
   feedListEl = feedList
   statusEl = status
+  headerModelEl = headerModel
+  headerDirEl = headerDir
+  headerBarEl = headerBar
+  headerContextEl = headerContext
 
   lastEventAt = Date.now()
 
@@ -420,6 +558,8 @@ export function init(): void {
   motionBtn.addEventListener('click', () => {
     applyMotion(model.setup.motion === 'full' ? 'reduced' : 'full')
   })
+  pauseBtn.addEventListener('click', () => applyPause(!model.paused))
+  countersBtn.addEventListener('click', () => applyCounters(!model.setup.counters))
 
   // `▸` раскрывает строку. Открыта всегда одна — этим правит Feed.toggle.
   feedList.addEventListener('click', (event) => {
@@ -457,6 +597,9 @@ function onIncoming(raw: unknown): void {
   const now = Date.now()
   lastEventAt = now
   if (connectionLost) setConnectionLost(false)
+  // Пауза: событие не разбирать и не перерисовывать ничего. Часы простоя и
+  // статус соединения при этом остаются живыми — панель замирает, а не ломается.
+  if (model.paused) return
   try {
     applyEvent(model, raw, now)
   } catch {
@@ -544,6 +687,7 @@ function renderMap(now: number): void {
 function renderFeed(now: number): void {
   renderFeedList()
   renderFeedNow(now)
+  renderHeader()
 }
 
 /**
@@ -569,6 +713,28 @@ function renderStatus(): void {
   statusEl.textContent = connectionLost ? t(model.setup.lang, 'connectionLost') : ''
 }
 
+/**
+ * Шапка: модель, папка сессии и контекст `N% · Xk ток`. Кольцо на карте и
+ * строка в шапке считают одно и то же число из `contextSummary`, поэтому
+ * Оценка (`~`) видна и там, и там.
+ */
+function renderHeader(): void {
+  const lang = model.setup.lang
+  if (headerModelEl) headerModelEl.textContent = model.modelName
+  if (headerDirEl) headerDirEl.textContent = model.sessionDir
+  const summary = contextSummary(model.state.context, lang)
+  if (headerContextEl && mountedContextText !== summary) {
+    headerContextEl.textContent = summary
+    mountedContextText = summary
+  }
+  if (headerBarEl) {
+    const ratio = contextRatio(model.state.context)
+    headerBarEl.style.width = ratio === null ? '0%' : `${Math.round(ratio * 100)}%`
+    // Тот же порог цвета, что у кольца на карте: шапка и карта не спорят.
+    headerBarEl.dataset.level = ratio === null ? 'none' : ratio >= 0.9 ? 'high' : ratio >= 0.7 ? 'mid' : 'ok'
+  }
+}
+
 function applyConfig(cfg: Record<string, unknown>): void {
   const theme = cfg.theme
   const lang = cfg.lang
@@ -576,6 +742,8 @@ function applyConfig(cfg: Record<string, unknown>): void {
   if (theme === 'dark' || theme === 'light' || theme === 'auto') model.setup.theme = theme as ThemeSetting
   if (lang === 'ru' || lang === 'en') model.setup.lang = lang as Language
   if (motion === 'full' || motion === 'reduced') model.setup.motion = motion
+  if (typeof cfg.pause === 'boolean') model.paused = cfg.pause
+  if (typeof cfg.counters === 'boolean') model.setup.counters = cfg.counters
   updateChrome()
   const now = Date.now()
   renderFeed(now)
@@ -612,6 +780,29 @@ function applyMotion(motion: 'full' | 'reduced'): void {
   persist({ motion })
 }
 
+/**
+ * `пауза`: вход событий перекрыт (`ingest`), картинка остаётся последней.
+ * Снятие паузы ничего не догоняет — панель просто продолжает жить с этого
+ * кадра, поэтому принудительно перерисовываем только часы строки «сейчас».
+ */
+function applyPause(paused: boolean): void {
+  model.paused = paused
+  updateChrome()
+  const now = Date.now()
+  if (!paused) invalidate(now)
+  persist({ pause: paused })
+}
+
+/** `счётчики`: числа вызовов под подписями станций. Меняет только статику. */
+function applyCounters(counters: boolean): void {
+  model.setup.counters = counters
+  updateChrome()
+  const now = Date.now()
+  prune(model.state, now)
+  renderMap(now)
+  persist({ counters })
+}
+
 /** Всё, что читается из языка и темы: подписи кнопок, CSS-токены, `lang` документа. */
 function updateChrome(): void {
   const lang = model.setup.lang
@@ -628,14 +819,27 @@ function updateChrome(): void {
   const themeBtn = document.getElementById('theme-btn')
   const langBtn = document.getElementById('lang-btn')
   const motionBtn = document.getElementById('motion-btn')
+  const pauseBtn = document.getElementById('pause-btn')
+  const countersBtn = document.getElementById('counters-btn')
   const feed = document.getElementById('feed')
   if (themeBtn) themeBtn.textContent = t(lang, theme === 'dark' ? 'themeDark' : 'themeLight')
   if (langBtn) langBtn.textContent = t(lang, lang === 'ru' ? 'languageRu' : 'languageEn')
   if (motionBtn) motionBtn.textContent = t(lang, model.setup.motion === 'full' ? 'motionFull' : 'motionReduced')
+  // Кнопка-переключатель обязана говорить, во что она превратится: `aria-pressed`
+  // остаётся для скринридера, текст — для глаза.
+  if (pauseBtn) {
+    pauseBtn.textContent = t(lang, model.paused ? 'pauseOff' : 'pauseOn')
+    pauseBtn.setAttribute('aria-pressed', String(model.paused))
+  }
+  if (countersBtn) {
+    countersBtn.textContent = t(lang, 'countersLabel')
+    countersBtn.setAttribute('aria-pressed', String(model.setup.counters))
+  }
   if (feed) feed.setAttribute('aria-label', t(lang, 'feedTitle'))
 
   watchSystemThemeIfNeeded()
   renderStatus()
+  renderHeader()
 }
 
 /** `auto` живёт, только если пришла из конфига: переключатель — dark/light. */
@@ -653,7 +857,7 @@ function watchSystemThemeIfNeeded(): void {
 }
 
 /** Запись настройки: отказ = канал до main лежит, это тот же `connectionLost`. */
-function persist(patch: Record<string, string>): void {
+function persist(patch: Record<string, string | boolean>): void {
   const bridge = typeof window === 'undefined' ? undefined : window.dsmap
   if (!bridge?.setConfig) return
   bridge.setConfig(patch).catch(() => setConnectionLost(true))

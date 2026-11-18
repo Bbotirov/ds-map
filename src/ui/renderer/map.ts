@@ -1,6 +1,7 @@
 /**
  * Карта-радар: SVG 460×430, геометрия и тайминги — из §11.1 (lot-map, MIT).
- * Пульсы, маршрут, станции, часы, кольцо контекста, фоновая работа.
+ * Пульсы, маршрут, станции, часы, кольцо контекста, фоновая работа, вспышки
+ * мгновенных событий и бейдж повтора модели.
  *
  * Рендер разбит на два слоя: `base` (спицы, узлы, подписи — меняется редко)
  * и `fx` (маршрут, свечение, часы, кольцо, пульсы — оживляет rAF).
@@ -8,7 +9,7 @@
  */
 
 import type { ContextReading, Station, ToolStatus } from '../../core/events.js'
-import { stationLabel, t, type Language } from '../i18n.js'
+import { format, stationLabel, t, type Language } from '../i18n.js'
 import { getPalette, resolveTheme, type Palette, type ThemeSetting } from './palette.js'
 
 export const W = 460
@@ -27,6 +28,10 @@ export const RIPPLE_MS = 450
 export const GLOW_MS = 3200
 export const ALARM_MS = 6000
 export const SWITCH_MS = 8000
+/** Вспышка станции на мгновенном событии (правило доступа, письмо субагенту). */
+export const FLASH_MS = GLOW_MS
+/** Бейдж повтора на станции модели: держится дольше, чтобы успели прочитать. */
+export const RETRY_MS = 12_000
 export const DONE_MS = 1100
 export const TRAIL_HOLD_MS = 40_000
 export const TRAIL_FADE_MS = 20_000
@@ -94,6 +99,14 @@ export interface State {
   active: Map<Station, ActiveStation>
   /** Станция → время ошибки. Точка держится до следующего сообщения пользователя. */
   alarms: Map<Station, number>
+  /**
+   * Станция → время мгновенного события: у такой станции нет открытого
+   * вызова, поэтому гореть ей не на чём, кроме короткой вспышки.
+   */
+  flash: Map<Station, number>
+  /** Последняя попытка модели: бейдж `повтор 2/5` на станции `model`. */
+  retry: { attempt: number; of: number } | null
+  retryAt: number
   /** `null` — usage ещё не приходил: кольцо пустое, процент прочерком. */
   context: ContextReading | null
   rippleAt: number
@@ -107,6 +120,8 @@ export interface Setup {
   layout: 'you-top' | 'you-bottom'
   motion: 'full' | 'reduced'
   lang: Language
+  /** Настройка `счётчики`: числа вызовов под подписями станций. */
+  counters: boolean
 }
 
 export function createState(): State {
@@ -116,6 +131,9 @@ export function createState(): State {
     stationCounts: new Map(),
     active: new Map(),
     alarms: new Map(),
+    flash: new Map(),
+    retry: null,
+    retryAt: 0,
     context: null,
     rippleAt: 0,
     switchAt: 0,
@@ -157,6 +175,25 @@ export function contextText(context: ContextReading | null): string {
   return `${context?.estimated ? '~' : ''}${Math.round(p * 100)}%`
 }
 
+/** Тысяцы токенов для шапки: `12900 → 12.9k`, `999 → 999`, `1_250_000 → 1.3M`. */
+export function tokenText(used: number): string {
+  if (!Number.isFinite(used) || used <= 0) return '0'
+  if (used >= 1_000_000) return `${(used / 1_000_000).toFixed(1)}M`
+  if (used >= 1000) return `${(used / 1000).toFixed(1)}k`
+  return String(Math.round(used))
+}
+
+/**
+ * Строка контекста в шапке: `5% · 12.9k ток`, с `~` перед оценкой.
+ * Отдельная функция, а не разметка: шапка и тесты обязаны печатать одно число.
+ */
+export function contextSummary(context: ContextReading | null, lang: Language): string {
+  const ratio = contextRatio(context)
+  if (context === null || ratio === null) return '—'
+  const percent = `${context.estimated ? '~' : ''}${Math.round(ratio * 100)}%`
+  return `${percent} · ${tokenText(context.used)} ${t(lang, 'contextUnits')}`
+}
+
 // --- публичное API отрисовки ---
 
 /** Ключ слоя-каркаса: меняется только тема, раскладка и язык. */
@@ -164,10 +201,10 @@ export function structureKey(setup: Setup): string {
   return `${resolveTheme(setup.theme)}|${setup.layout}|${setup.lang}`
 }
 
-/** Ключ статического слоя: спицы и узлы зависят от палитры, раскладки, языка и счётчиков. */
+/** Ключ статического слоя: спицы и узлы зависят от палитры, раскладки, языка, счётчиков и настройки их показа. */
 export function baseKey(state: State, setup: Setup): string {
   const counts = STATIONS.map((s) => state.stationCounts.get(s) ?? 0).join(',')
-  return `${structureKey(setup)}|${counts}`
+  return `${structureKey(setup)}|${setup.counters ? 'on' : 'off'}|${counts}`
 }
 
 export function drawSkeleton(setup: Setup): string {
@@ -197,7 +234,7 @@ export function drawBase(state: State, setup: Setup): string {
   }
 
   for (let i = 0; i < STATIONS.length; i++) {
-    out.push(drawNodeBase(STATIONS[i], i, c, shift, setup.lang, state))
+    out.push(drawNodeBase(STATIONS[i], i, c, shift, setup.lang, state, setup.counters))
   }
 
   out.push(
@@ -215,7 +252,7 @@ export function drawEffects(state: State, now: number, setup: Setup): string {
   const out: string[] = [drawTrail(state, now, c, reduced, shift)]
 
   for (let i = 0; i < STATIONS.length; i++) {
-    out.push(drawStationFx(STATIONS[i], i, state, now, c, shift, reduced))
+    out.push(drawStationFx(STATIONS[i], i, state, now, c, shift, reduced, setup.lang))
   }
 
   out.push(drawCoreRings(state, now, c, setup.lang))
@@ -240,6 +277,10 @@ export function drawMap(state: State, now: number, setup: Setup): string {
 export function isAnimating(state: State, now: number): boolean {
   if (state.pulses.some((p) => now - p.startedAt < PULSE_MS)) return true
   if (state.active.size > 0) return true
+  for (const at of state.flash.values()) {
+    if (now - at < FLASH_MS) return true
+  }
+  if (state.retry && now - state.retryAt < RETRY_MS) return true
   if (now - state.rippleAt < RIPPLE_MS) return true
   if (now - state.switchAt < SWITCH_MS) return true
   if (now - state.answerAt < DONE_MS) return true
@@ -262,19 +303,33 @@ function stationColors(station: Station, c: Palette, glowing: boolean): { fill: 
   return { fill: glowing ? c.active : c.node, stroke: c.line, hot: c.active }
 }
 
-function drawNodeBase(station: Station, index: number, c: Palette, shift: number, lang: Language, state: State): string {
+function drawNodeBase(
+  station: Station,
+  index: number,
+  c: Palette,
+  shift: number,
+  lang: Language,
+  state: State,
+  counters: boolean,
+): string {
   const p = place(index, STATIONS.length, shift)
   const { stroke } = stationColors(station, c, false)
   const label = stationLabel(lang, station)
-  return (
+  const count = state.stationCounts.get(station) ?? 0
+  let el =
     `<g transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">` +
     `<circle r="${NODE}" fill="${c.node}" stroke="${stroke}" stroke-width="1.5"/>` +
-    icon(station, glyphColor(station, c, false, false, state.stationCounts.get(station) ?? 0)) +
+    icon(station, glyphColor(station, c, false, false, count)) +
     `<text x="0" y="${NODE + 14}" text-anchor="middle" font-size="10" fill="${c.label}" ` +
     `paint-order="stroke" stroke="${c.background}" stroke-width="3.5" stroke-linejoin="round" ` +
-    `font-family="system-ui, sans-serif">${esc(label)}</text>` +
-    `</g>`
-  )
+    `font-family="system-ui, sans-serif">${esc(label)}</text>`
+  // Счётчик — тем же шрифтом, но глуше: это подпись к подписи, а не данные.
+  if (counters && count > 0) {
+    el += `<text x="0" y="${NODE + 25}" text-anchor="middle" font-size="9" fill="${c.faint}" ` +
+      `paint-order="stroke" stroke="${c.background}" stroke-width="3" stroke-linejoin="round" ` +
+      `font-family="system-ui, sans-serif">${count}</text>`
+  }
+  return el + '</g>'
 }
 
 /**
@@ -296,12 +351,16 @@ function drawStationFx(
   c: Palette,
   shift: number,
   reduced: boolean,
+  lang: Language,
 ): string {
   const active = state.active.get(station)
   const alarmAt = state.alarms.get(station)
+  const flashedAt = state.flash.get(station)
+  const flashed = flashedAt !== undefined && now - flashedAt < FLASH_MS
   const switched = station === 'model' && now - state.switchAt < SWITCH_MS
-  const glowing = !!active || switched
-  if (!active && !alarmAt && !switched) return ''
+  const retry = station === 'model' && state.retry && now - state.retryAt < RETRY_MS ? state.retry : null
+  const glowing = !!active || switched || flashed
+  if (!active && !alarmAt && !switched && !flashed && !retry) return ''
 
   const p = place(index, STATIONS.length, shift)
   const { fill, hot } = stationColors(station, c, glowing)
@@ -317,6 +376,15 @@ function drawStationFx(
     station,
     glyphColor(station, c, glowing, !!alarmAt, state.stationCounts.get(station) ?? 0),
   )
+
+  // Вспышка без открытого вызова: волна от мгновенного события, часов нет.
+  if (!active && flashed && flashedAt !== undefined) {
+    const pct = Math.min(1, (now - flashedAt) / FLASH_MS)
+    if (!reduced) {
+      el += `<circle r="${(NODE + 8 + pct * 12).toFixed(1)}" fill="none" stroke="${hot}" ` +
+        `stroke-width="2" opacity="${(1 - pct).toFixed(2)}"/>`
+    }
+  }
 
   if (active) {
     const elapsed = now - active.startedAt
@@ -343,6 +411,15 @@ function drawStationFx(
     el += `<circle cx="${(-NODE + 6).toFixed(1)}" cy="${(-NODE + 6).toFixed(1)}" r="6" fill="${c.error}" opacity="0.95"/>`
     el += `<text x="${(-NODE + 6).toFixed(1)}" y="${(-NODE + 9).toFixed(1)}" text-anchor="middle" font-size="8" ` +
       `fill="${c.background}" font-weight="bold" font-family="system-ui, sans-serif">✕</text>`
+  }
+
+  if (retry) {
+    // Бейдж сбоя: только счёт попыток. Текста ошибки харнеса здесь нет и быть
+    // не может — он не уходит из `core/route.ts`.
+    el += `<text x="0" y="${(NODE + 25).toFixed(1)}" text-anchor="middle" font-size="9" font-weight="600" ` +
+      `fill="${c.error}" paint-order="stroke" stroke="${c.background}" stroke-width="3.5" ` +
+      `stroke-linejoin="round" font-family="system-ui, sans-serif">` +
+      `${esc(format(lang, 'retryBadge', { a: retry.attempt, o: retry.of }))}</text>`
   }
 
   el += '</g>'

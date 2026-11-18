@@ -28,6 +28,21 @@
     body { background: var(--dsmap-background); color: var(--dsmap-text); font-size: 11px; }
     #app { width: 100%; height: 100%; display: flex; flex-direction: column; }
 
+    /* Шапка: чем и где идёт работа плюс заполнение окна. Плоско и глухо —
+       это подпись состояния, а не панель приборов. */
+    #header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 6px; border-bottom: 1px solid var(--dsmap-line);
+      font-size: 10px; color: var(--dsmap-label);
+    }
+    #header-model { color: var(--dsmap-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #header-dir { color: var(--dsmap-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #header-context { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    #header-bar { flex: 0 1 72px; height: 3px; margin-left: auto; background: var(--dsmap-line); overflow: hidden; }
+    #header-bar-fill { display: block; height: 100%; width: 0; background: var(--dsmap-label); }
+    #header-bar-fill[data-level="mid"] { background: var(--dsmap-accent); }
+    #header-bar-fill[data-level="high"] { background: var(--dsmap-error); }
+
     #toolbar { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--dsmap-line); }
     #toolbar button {
       min-width: 62px; padding: 2px 6px; font: inherit; font-size: 10px; cursor: pointer;
@@ -35,6 +50,8 @@
       border: 1px solid var(--dsmap-line); border-radius: 3px;
     }
     #toolbar button:hover { border-color: var(--dsmap-label); }
+    /* Включённый переключатель виден без иконки: рамка и цвет текста. */
+    #toolbar button[aria-pressed="true"] { border-color: var(--dsmap-accent); color: var(--dsmap-accent); }
     #status { margin-left: auto; font-size: 10px; color: var(--dsmap-error); }
     #toolbar button:focus-visible, #feed-list button:focus-visible { outline: 2px solid var(--dsmap-accent); outline-offset: 1px; }
 
@@ -75,10 +92,18 @@
 </head>
 <body>
   <div id="app">
+    <div id="header">
+      <span id="header-model"></span>
+      <span id="header-dir"></span>
+      <span id="header-bar" aria-hidden="true"><span id="header-bar-fill"></span></span>
+      <span id="header-context" role="status" aria-live="polite">—</span>
+    </div>
     <div id="toolbar">
       <button id="theme-btn" type="button">—</button>
       <button id="lang-btn" type="button">—</button>
       <button id="motion-btn" type="button">—</button>
+      <button id="counters-btn" type="button" aria-pressed="false">—</button>
+      <button id="pause-btn" type="button" aria-pressed="false">—</button>
       <div id="status" role="status" aria-live="polite"></div>
     </div>
     <div id="map"></div>

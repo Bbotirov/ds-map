@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { applyEvent, createModel, prune } from '../src/ui/renderer/app.js'
-import { baseKey, structureKey, STATIONS, TRAIL_STOPS, type Setup, type State } from '../src/ui/renderer/map.js'
+import { applyEvent, createModel, ingest, prune } from '../src/ui/renderer/app.js'
+import {
+  FLASH_MS, RETRY_MS,
+  baseKey, contextSummary, drawBase, drawMap, structureKey, STATIONS, TRAIL_STOPS, type Setup, type State,
+} from '../src/ui/renderer/map.js'
+import { EventMapper, guardSet, type HarnessRecord } from '../src/core/route.js'
 
 const T0 = 100_000
 
@@ -92,13 +96,13 @@ describe('applyEvent', () => {
   it('ответ с ошибкой и прерванный ответ различимы в ленте', () => {
     const m = createModel()
     applyEvent(m, { v: 1, t: 'answer', ts: T0, ms: 900, status: 'err' }, T0)
-    expect(m.feed.render('ru')).toContain('Ответ с ошибкой')
+    expect(m.feed.render('ru')).toContain('ход с ошибкой')
     expect(m.feed.render('ru')).toContain('✕')
     expect(m.state.answerStatus).toBe('err')
 
     const aborted = createModel()
     applyEvent(aborted, { v: 1, t: 'answer', ts: T0, ms: 900, status: 'aborted' }, T0)
-    expect(aborted.feed.render('ru')).toContain('Ответ прерван')
+    expect(aborted.feed.render('ru')).toContain('ход прерван')
   })
 
   it('model.switch: ◆ в ленте и подсветка станции model на SWITCH_MS', () => {
@@ -129,12 +133,12 @@ describe('applyEvent', () => {
     const m = createModel()
     applyEvent(m, { v: 1, t: 'compaction', ts: T0, phase: 'start', ms: 0 }, T0)
     expect(m.state.active.get('model')?.count).toBe(1)
-    expect(m.feed.getItems()[0]).toMatchObject({ status: 'active', key: 'compactionLabel' })
+    expect(m.feed.getItems()[0]).toMatchObject({ status: 'active', key: 'phraseCompaction' })
 
     applyEvent(m, { v: 1, t: 'compaction', ts: T0 + 2_000, phase: 'end', ms: 2_000 }, T0 + 2_000)
     expect(m.state.active.has('model')).toBe(false)
     expect(m.feed.getItems()[0]).toMatchObject({ status: 'done', ms: 2_000 })
-    expect(m.feed.render('ru')).toContain('Уплотнение контекста')
+    expect(m.feed.render('ru')).toContain('сжатие контекста')
     expect(m.openCompaction).toBe(null)
   })
 
@@ -170,7 +174,7 @@ describe('applyEvent', () => {
     applyEvent(m, { v: 1, t: 'prompt', ts: T0, chars: 214 }, T0)
     expect(m.state.rippleAt).toBe(T0)
     expect(m.state.trail).toEqual([{ station: 'you', ts: T0 }])
-    expect(m.feed.render('ru')).toContain('Запрос · 214 симв.')
+    expect(m.feed.render('ru')).toContain('ты написал · 214 симв.')
   })
 
   it('маршрут: model не участвует, повтор подряд — одна нога, память — 7 станций', () => {
@@ -237,5 +241,206 @@ describe('applyEvent', () => {
     expect(ru.feed.render('ru')).toContain('Браузер')
     expect(en.feed.render('en')).toContain('Browser')
     expect(en.feed.render('en')).toContain('●')
+  })
+
+  describe('слой фраз', () => {
+    /** Имена инструментов из реальных логов: в ленте они остаются подробностью. */
+    it('вызов инструмента: фраза говорит род работы, метка — деталь', () => {
+      const m = createModel()
+      applyEvent(m, { v: 1, t: 'tool.start', ts: T0, id: 'c1', name: 'pwsh', station: 'shell', label: 'get-childitem' }, T0)
+      expect(m.feed.render('ru')).toContain('запуск команды · get-childitem')
+      applyEvent(m, { v: 1, t: 'tool.end', ts: T0 + 10, id: 'c1', status: 'ok', ms: 10 }, T0 + 10)
+
+      applyEvent(m, { v: 1, t: 'tool.start', ts: T0 + 20, id: 'c2', name: 'skill', station: 'skills', label: 'using-superpowers' }, T0 + 20)
+      expect(m.feed.render('ru')).toContain('вызов скилла · using-superpowers')
+      applyEvent(m, { v: 1, t: 'tool.end', ts: T0 + 30, id: 'c2', status: 'ok', ms: 10 }, T0 + 30)
+
+      applyEvent(m, { v: 1, t: 'tool.start', ts: T0 + 40, id: 'c3', name: 'grep', station: 'files', label: 'grep' }, T0 + 40)
+      expect(m.feed.render('ru')).toContain('поиск по файлам')
+      applyEvent(m, { v: 1, t: 'tool.end', ts: T0 + 50, id: 'c3', status: 'ok', ms: 10 }, T0 + 50)
+
+      applyEvent(m, { v: 1, t: 'tool.start', ts: T0 + 60, id: 'c4', name: 'mcp__agent_bus__ask_model', station: 'agents', label: 'glm-4.7' }, T0 + 60)
+      expect(m.feed.render('en')).toContain('agent call')
+      expect(m.feed.render('en')).toContain('glm-4.7')
+    })
+
+    it('turn.start — «ход начат», ряд живёт до ответа', () => {
+      const m = createModel()
+      applyEvent(m, { v: 1, t: 'answer', ts: T0, ms: 100, status: 'err' }, T0)
+      expect(m.state.alarms.size).toBe(0)
+      applyEvent(m, { v: 1, t: 'tool.end', ts: T0 + 1, id: 'ghost', station: 'files', status: 'err' }, T0 + 1)
+      expect(m.state.alarms.size).toBe(1)
+
+      applyEvent(m, { v: 1, t: 'turn.start', ts: T0 + 2, turn: 3 }, T0 + 2)
+      expect(m.state.alarms.size).toBe(0)
+      expect(m.feed.getItems()[0]).toMatchObject({ station: 'you', status: 'active' })
+      expect(m.feed.render('ru')).toContain('ход начат')
+      expect(m.feed.render('en')).toContain('turn started')
+      expect(m.feed.isRunning()).toBe(true)
+
+      applyEvent(m, { v: 1, t: 'answer', ts: T0 + 3, ms: 900, status: 'ok' }, T0 + 3)
+      expect(m.feed.render('ru')).toContain('ход завершён')
+      expect(m.feed.isRunning()).toBe(false)
+    })
+
+    it('model.think — длительность шага в колонке времени', () => {
+      const m = createModel()
+      applyEvent(m, { v: 1, t: 'model.think', ts: T0, ms: 3_200 }, T0)
+      expect(m.feed.getItems()[0]).toMatchObject({ station: 'model', key: 'phraseThink', ms: 3_200 })
+      expect(m.feed.render('ru')).toContain('размышление')
+      expect(m.feed.render('ru')).toContain('3.2s')
+      expect(m.feed.render('en')).toContain('thinking')
+    })
+
+    it('model.step и context.update — ряды модели, сливающиеся в +N', () => {
+      const m = createModel()
+      applyEvent(m, { v: 1, t: 'model.step', ts: T0, context: { used: 18_400, max: 128_000, estimated: true } }, T0)
+      applyEvent(m, { v: 1, t: 'model.step', ts: T0 + 1, context: { used: 18_400, max: 128_000, estimated: true } }, T0 + 1)
+      expect(m.feed.getItems()[0]).toMatchObject({ station: 'model', count: 2 })
+      expect(m.feed.render('ru')).toContain('шаг модели +2')
+
+      applyEvent(m, { v: 1, t: 'context.update', ts: T0 + 2, used: 64_000, max: 128_000, estimated: false }, T0 + 2)
+      expect(m.state.context).toEqual({ used: 64_000, max: 128_000, estimated: false })
+      expect(m.feed.render('ru')).toContain('контекст')
+      expect(m.feed.render('en')).toContain('context')
+    })
+
+    it('guard.set finally зажигает станцию hooks', () => {
+      const m = createModel()
+      applyEvent(m, { v: 1, t: 'guard.set', ts: T0, kind: 'permission', label: 'standard-with-sudo' }, T0)
+
+      expect(m.state.flash.get('hooks')).toBe(T0)
+      expect(m.feed.getItems()[0]).toMatchObject({ station: 'hooks', key: 'phraseGuardPermission', label: 'standard-with-sudo' })
+      expect(m.feed.render('ru')).toContain('пресет разрешений · standard-with-sudo')
+      expect(m.feed.render('en')).toContain('permission preset')
+      // Вспышка видна на карте и гаснет по FLASH_MS.
+      expect(drawMap(m.state, T0, m.setup)).toContain('stroke="#f0c595"')
+      expect(drawMap(m.state, T0 + FLASH_MS + 1, m.setup)).not.toContain('stroke="#f0c595"')
+
+      applyEvent(m, { v: 1, t: 'guard.set', ts: T0 + 1, kind: 'sandbox', label: 'workspace-write' }, T0 + 1)
+      expect(m.feed.render('ru')).toContain('режим песочницы · workspace-write')
+      applyEvent(m, { v: 1, t: 'guard.set', ts: T0 + 2, kind: 'approval', label: 'auto' }, T0 + 2)
+      expect(m.feed.render('ru')).toContain('политика подтверждений · auto')
+      applyEvent(m, { v: 1, t: 'guard.set', ts: T0 + 3, kind: 'unknown-kind', label: '' }, T0 + 3)
+      expect(m.feed.render('ru')).toContain('правило доступа')
+    })
+
+    it('agent.msg — станция агентов и число вставленных писем', () => {
+      const m = createModel()
+      applyEvent(m, { v: 1, t: 'agent.msg', ts: T0, inserted: 2 }, T0)
+      expect(m.state.flash.get('agents')).toBe(T0)
+      expect(m.feed.render('ru')).toContain('входящее от агента · 2')
+      expect(m.feed.render('en')).toContain('message from agent · 2')
+    })
+
+    it('model.retry — бейдж «повтор 2/5» на станции модели', () => {
+      const m = createModel()
+      applyEvent(m, { v: 1, t: 'model.retry', ts: T0, attempt: 2, of: 5, delayMs: 484 }, T0)
+
+      expect(m.state.retry).toEqual({ attempt: 2, of: 5 })
+      expect(m.feed.getItems()[0]).toMatchObject({ station: 'model', status: 'error', label: '2/5' })
+      expect(m.feed.render('ru')).toContain('повтор запроса · 2/5')
+      expect(m.feed.render('en')).toContain('retrying request · 2/5')
+      expect(m.feed.render('ru')).toContain('✕')
+      expect(drawMap(m.state, T0, m.setup)).toContain('повтор 2/5')
+
+      m.setup.lang = 'en'
+      expect(drawMap(m.state, T0, m.setup)).toContain('retry 2/5')
+      m.setup.lang = 'ru'
+      expect(drawMap(m.state, T0 + RETRY_MS + 1, m.setup)).not.toContain('повтор')
+      prune(m.state, T0 + RETRY_MS + 1)
+      expect(m.state.retry).toBe(null)
+    })
+
+    it('пауза перекрывает вход событий, панель остаётся на последнем кадре', () => {
+      const m = createModel()
+      expect(ingest(m, toolStart('a', 'files', 'a.ts'), T0)).toBe(true)
+      const rev = m.feed.revision
+
+      m.paused = true
+      expect(ingest(m, toolEnd('a', 'ok', 100), T0 + 100)).toBe(false)
+      expect(ingest(m, { v: 1, t: 'turn.start', ts: T0 + 200, turn: 2 }, T0 + 200)).toBe(false)
+      expect(m.feed.revision).toBe(rev)
+      expect(m.feed.getItems()[0].status).toBe('active')
+
+      m.paused = false
+      expect(ingest(m, { v: 1, t: 'prompt', ts: T0 + 300, chars: 12 }, T0 + 300)).toBe(true)
+      expect(m.feed.revision).toBe(rev + 1)
+    })
+
+    it('счётчики станций: настройка меняет статику карты', () => {
+      const m = createModel()
+      applyEvent(m, toolStart('a', 'files', 'a.ts'), T0)
+      applyEvent(m, toolStart('b', 'files', 'b.ts'), T0 + 1)
+
+      m.setup.counters = true
+      const on = drawBase(m.state, m.setup)
+      expect(on).toContain('>2</text>')
+      m.setup.counters = false
+      const off = drawBase(m.state, m.setup)
+      expect(off).not.toContain('>2</text>')
+      expect(baseKey(m.state, m.setup)).not.toBe(baseKey(m.state, { ...m.setup, counters: true }))
+      // Каркас от счётчиков не пересобирается: только статика.
+      expect(structureKey(m.setup)).toBe(structureKey({ ...m.setup, counters: true }))
+    })
+  })
+
+  describe('шапка', () => {
+    it('контекст: `N% · Xk tok`, оценка с `~`, без данных — прочерк', () => {
+      expect(contextSummary({ used: 12_900, max: 256_000, estimated: false }, 'ru')).toBe('5% · 12.9k ток')
+      expect(contextSummary({ used: 12_900, max: 256_000, estimated: false }, 'en')).toBe('5% · 12.9k tok')
+      expect(contextSummary({ used: 6_200, max: 128_000, estimated: true }, 'ru')).toBe('~5% · 6.2k ток')
+      expect(contextSummary(null, 'ru')).toBe('—')
+      expect(contextSummary({ used: 0, max: 0, estimated: true }, 'ru')).toBe('—')
+      expect(contextSummary({ used: 900, max: 1_000, estimated: false }, 'ru')).toBe('90% · 900 ток')
+    })
+
+    it('модель и папка сессии приходят из событий', () => {
+      const m = createModel()
+      applyEvent(m, { v: 1, t: 'session.start', ts: T0, session: 's_1', model: 'glm-4.7', cwd: 'ds-map' }, T0)
+      expect(m.modelName).toBe('glm-4.7')
+      expect(m.sessionDir).toBe('ds-map')
+      applyEvent(m, { v: 1, t: 'model.switch', ts: T0 + 1, from: 'glm-4.7', to: 'fable 5.2' }, T0 + 1)
+      expect(m.modelName).toBe('fable 5.2')
+      expect(m.feed.render('ru')).toContain('смена модели · glm-4.7 → fable 5.2')
+      expect(m.feed.render('en')).toContain('model switch')
+    })
+  })
+
+  describe('приватность напечатанного', () => {
+    it('в разметке ленты нет длинных сырых строк из записей харнеса', () => {
+      const mapper = new EventMapper()
+      const preset = 'p'.repeat(300)
+      const policyKey = 'k'.repeat(89)
+      const records: HarnessRecord[] = [
+        { type: 'session', seq: 1, time: T0, id: 's_1', cwd: 'C:\\Users\\bot\\Desktop\\fun proj\\ds-map' },
+        { type: 'permission/preset', seq: 2, time: T0 + 1, data: { turn: 1, preset } },
+        {
+          type: 'llm/retry', seq: 3, time: T0 + 2,
+          data: { retryId: 'r1', turn: 1, step: 1, provider: 'nvidia', mode: 'retry', policyKey, retry: 2, maxRetries: 5, delayMs: 483.5, transient: true, failure: { message: `${'HTTP 429 '.repeat(40)}`, code: 'sk-proj-abc123' } },
+        },
+        { type: 'tool/call', seq: 4, time: T0 + 3, data: { callId: 'c1', name: 'pwsh', arguments: JSON.stringify({ command: `echo ${'x'.repeat(300)}` }), turn: 1, step: 1 } },
+        { type: 'agent/inbox/spliced', seq: 5, time: T0 + 4, data: { letterId: 'l1', recipient: 'a1', inserted: 2, queue: `${'секрет'.repeat(40)}` } },
+      ]
+      const m = createModel()
+      for (const rec of records) {
+        for (const evt of mapper.map(rec)) applyEvent(m, evt, T0)
+      }
+
+      const html = m.feed.render('ru')
+      const leaks = [preset, 'x'.repeat(300), 'HTTP 429', 'sk-proj-abc123', policyKey, 'C:\\Users', 'секрет']
+      for (const leak of leaks) expect(html).not.toContain(leak)
+      // Ни один напечатанный ряд не длиннее потолка имён: `clean()` своё сделал.
+      for (const item of m.feed.getItems()) expect(item.label.length).toBeLessThanOrEqual(48)
+      expect(html).toContain('пресет разрешений · ')
+      expect(html).toContain('повтор запроса · 2/5')
+      expect(m.state.flash.get('hooks')).toBe(T0)
+      expect(m.state.retry).toEqual({ attempt: 2, of: 5 })
+    })
+
+    it('метка guard.set проходит clean() ещё в маппере', () => {
+      const evt = guardSet('permission', 'p'.repeat(300), T0)
+      expect(evt.label).toHaveLength(48)
+    })
   })
 })

@@ -50,14 +50,21 @@ describe('normalizeConfig', () => {
 
   it('принимает только разрешённые значения', () => {
     expect(normalizeConfig({ theme: 'light', lang: 'en', motion: 'reduced' })).toEqual({
-      theme: 'light', lang: 'en', motion: 'reduced',
+      theme: 'light', lang: 'en', motion: 'reduced', pause: false, counters: true,
     })
     expect(normalizeConfig({ theme: 'neon', lang: 'uz', motion: 'slow' })).toEqual(DEFAULT_CONFIG)
   })
 
+  it('pause и counters принимают только настоящие булевы', () => {
+    expect(normalizeConfig({ pause: true, counters: false })).toMatchObject({ pause: true, counters: false })
+    // `1` и `"true"` — не булевы: молча возвращаем дефолт, иначе пауза включится сама.
+    expect(normalizeConfig({ pause: 1, counters: 'true' })).toEqual(DEFAULT_CONFIG)
+    expect(normalizeConfig({ pause: 'yes' })).toEqual(DEFAULT_CONFIG)
+  })
+
   it('не пропускает посторонние поля и не падает на них', () => {
     const out = normalizeConfig({ theme: 'light', token: 'секрет', cwd: 'c:\\proj' })
-    expect(Object.keys(out).sort()).toEqual(['lang', 'motion', 'theme'])
+    expect(Object.keys(out).sort()).toEqual(['counters', 'lang', 'motion', 'pause', 'theme'])
     expect(out.theme).toBe('light')
   })
 
@@ -68,14 +75,14 @@ describe('normalizeConfig', () => {
 
 describe('файл настроек', () => {
   it('круговой проход: записали — прочитали', () => {
-    writeConfig({ theme: 'light', lang: 'en', motion: 'reduced' })
-    expect(readConfig()).toEqual({ theme: 'light', lang: 'en', motion: 'reduced' })
+    writeConfig({ theme: 'light', lang: 'en', motion: 'reduced', pause: true, counters: false })
+    expect(readConfig()).toEqual({ theme: 'light', lang: 'en', motion: 'reduced', pause: true, counters: false })
   })
 
   it('BOM от PowerShell не ломает настройки', () => {
     fs.mkdirSync(path.dirname(configPath()), { recursive: true })
-    fs.writeFileSync(configPath(), '\uFEFF{"theme":"light","lang":"en","motion":"reduced"}')
-    expect(readConfig()).toEqual({ theme: 'light', lang: 'en', motion: 'reduced' })
+    fs.writeFileSync(configPath(), '\uFEFF{"theme":"light","lang":"en","motion":"reduced","pause":true}')
+    expect(readConfig()).toEqual({ theme: 'light', lang: 'en', motion: 'reduced', pause: true, counters: true })
   })
 
   it('битый JSON и несуществующий файл — дефолты, без исключения', () => {

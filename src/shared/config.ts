@@ -36,14 +36,18 @@ export function sessionsRoot(): string {
   return path.join(dshHome(), 'sessions')
 }
 
-/** Настройки панели. Всё остальное в файле конфига игнорируется. */
+/** Настройки панели. Всё остальное в файле игнорируется. */
 export interface DsMapConfig {
   theme: 'dark' | 'light'
   lang: 'ru' | 'en'
   motion: 'full' | 'reduced'
+  /** `пауза`: вход событий перекрыт, панель показывает последний кадр. */
+  pause: boolean
+  /** `счётчики`: числа вызовов под подписями станций. */
+  counters: boolean
 }
 
-export const DEFAULT_CONFIG: DsMapConfig = { theme: 'dark', lang: 'ru', motion: 'full' }
+export const DEFAULT_CONFIG: DsMapConfig = { theme: 'dark', lang: 'ru', motion: 'full', pause: false, counters: true }
 
 /** Значения из файла недоверенные: чужое поле или мусорный тип не должны попадать в UI. */
 export function normalizeConfig(raw: unknown): DsMapConfig {
@@ -53,6 +57,10 @@ export function normalizeConfig(raw: unknown): DsMapConfig {
     theme: p.theme === 'light' || p.theme === 'dark' ? p.theme : DEFAULT_CONFIG.theme,
     lang: p.lang === 'ru' || p.lang === 'en' ? p.lang : DEFAULT_CONFIG.lang,
     motion: p.motion === 'reduced' || p.motion === 'full' ? p.motion : DEFAULT_CONFIG.motion,
+    // Булевы настройки принимаются только настоящим `true`/`false`: `1` или
+    // `"true"` из чужого файла означали бы включённую паузу по ошибке формата.
+    pause: typeof p.pause === 'boolean' ? p.pause : DEFAULT_CONFIG.pause,
+    counters: typeof p.counters === 'boolean' ? p.counters : DEFAULT_CONFIG.counters,
   }
 }
 

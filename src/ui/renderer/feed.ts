@@ -6,12 +6,14 @@
  * гасит по тому же `id`. Угадывать строку по времени нельзя — вызовы одного
  * хода идут параллельно и пересекаются.
  *
- * Тексты-статусы (запрос, ответ, сессия, уплотнение) хранятся ключами i18n,
- * поэтому переключение `ru`/`en` переписывает и уже напечатанные строки.
- * Метки из событий (`src/app.ts`, `npm test`) — имена, они не переводятся.
+ * Ряд читается как «станция — фраза — подробность»: фраза всегда локализована
+ * (ключ i18n), подробность — метка из события (имя файла, хост, имя команды).
+ * Сырой идентификатор сам по себе в ленте не появляется: он только подробность.
+ * Переключение `ru`/`en` переписывает и уже напечатанные строки, метки не
+ * переводятся — они приходят из `src/core/route.ts` как есть.
  */
 
-import { stationLabel, t, type Language } from '../i18n.js'
+import { format, stationLabel, t, type Language } from '../i18n.js'
 import type { Station, ToolStatus } from '../../core/events.js'
 
 export type FeedStatus = 'active' | 'done' | 'error' | 'switch'
@@ -20,6 +22,12 @@ export type FeedStatus = 'active' | 'done' | 'error' | 'switch'
 export const MAX_ITEMS = 16
 /** Длиннее — метка обрезается по краю панели, ряд становится раскрываемым. */
 export const TRUNCATE_CHARS = 44
+/**
+ * Потолок подробности — ровно столько, сколько `core/redact.ts` оставляет
+ * имени (`clean`). Панель не обязана доверять источнику: длинная сырая строка
+ * не должна попасть в DOM даже если пришёл кто-то другой.
+ */
+export const DETAIL_CHARS = 48
 /** Прочерк: длительности нет (мгновенное событие или вызов без конца). */
 export const DASH = '—'
 
@@ -27,18 +35,18 @@ export interface FeedEntry {
   /** Идентификатор вызова. Без него строка считается мгновенной и не закрывается. */
   id?: string
   station: Station
-  /** Метка из события: файл, команда, домен. Переводу не подлежит. */
+  /** Подробность из события: файл, команда, домен. Переводу не подлежит. */
   label?: string
-  /** Ключ i18n для служебных строк: `promptChars`, `answerOk`, `compactionLabel`. */
+  /** Ключ i18n с фразой: `phraseThink`, `answerOk`, `phraseReadFile`. */
   key?: string
-  /** Подстановки вида `{n}` для ключа i18n. */
+  /** Подстановки вида `{n}`, `{a}`, `{o}` для ключа i18n. */
   vars?: Record<string, string | number>
   status: FeedStatus
   /** Длительность в мс — уезжает в колонку времени. Нет её — прочерк. */
   ms?: number
   /** Время события из источника: по нему считается «сколько уже идёт». */
   ts?: number
-  /** Сворачиваться в `+N` умеют только завершённые вызовы инструментов. */
+  /** Сворачиваться в `+N` умеют ряды одного рода: вызовы и службы модели. */
   mergeable?: boolean
   /** Фоновая работа: ряд не гаснет на конце хода, ждёт отчёт. */
   background?: boolean
@@ -83,6 +91,11 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
+/** Обрезать подробность до потолка имён: сырая строка в ленту не пролезает. */
+function cutDetail(s: string): string {
+  return s.length > DETAIL_CHARS ? `${s.slice(0, DETAIL_CHARS - 1)}…` : s
+}
+
 export class Feed {
   private items: FeedItem[] = []
   private autoId = 0
@@ -104,11 +117,12 @@ export class Feed {
   add(entry: FeedEntry): FeedItem {
     this.rev += 1
     const id = entry.id ?? `auto_${++this.autoId}`
+    const label = cutDetail(entry.label ?? '')
     const found = this.items.findIndex((it) => it.id === id && it.status === 'active')
     if (found >= 0) {
       const it = this.items[found]
       it.station = entry.station
-      it.label = entry.label ?? ''
+      it.label = label
       it.key = entry.key ?? null
       it.vars = entry.vars ?? null
       it.status = entry.status
@@ -122,7 +136,7 @@ export class Feed {
     const item: FeedItem = {
       id,
       station: entry.station,
-      label: entry.label ?? '',
+      label,
       key: entry.key ?? null,
       vars: entry.vars ?? null,
       status: entry.status,
@@ -256,15 +270,17 @@ export class Feed {
   }
 
   /**
-   * Слить ряд `i` с соседом ниже: тот же станция, оба завершены, оба вызовы.
-   * Получается одна строка с `+2` вместо двух одинаковых.
+   * Слить ряд `i` с соседом ниже: тот же станция, та же фраза, оба завершены.
+   * Получается одна строка с `+2` вместо двух одинаковых. Разные рода работы
+   * не сливаем: «чтение файла» и «поиск» — не один и тот же поступок.
    */
   private mergeAt(at: number): void {
     const cur = this.items[at]
     const next = this.items[at + 1]
     if (!cur || !next) return
     if (!cur.mergeable || !next.mergeable) return
-    if (cur.station !== next.station || cur.status !== 'done' || next.status !== 'done') return
+    if (cur.station !== next.station || cur.key !== next.key) return
+    if (cur.status !== 'done' || next.status !== 'done') return
     cur.count += next.count
     if (cur.ms === undefined) cur.ms = next.ms
     if (!next.collapsed) cur.collapsed = false
@@ -276,14 +292,15 @@ export class Feed {
   }
 }
 
-/** Текст строки: i18n-ключ со служебных рядов, иначе метка из события. */
+/**
+ * Текст строки: сначала фраза (ключ i18n), рядом — подробность из события.
+ * Ряд без ключа остаётся меткой: так было до слоя фраз, и тесты на это опираются.
+ */
 function text(item: Pick<FeedItem, 'label' | 'key' | 'vars'>, lang: Language): string {
   if (!item.key) return item.label
-  const raw = t(lang, item.key)
-  if (!item.vars) return raw
-  let out = raw
-  for (const [name, value] of Object.entries(item.vars)) out = out.replace(`{${name}}`, String(value))
-  return out
+  const phrase = item.vars ? format(lang, item.key, item.vars) : t(lang, item.key)
+  if (!item.label) return phrase
+  return `${phrase} · ${item.label}`
 }
 
 function isExpandable(label: string): boolean {
