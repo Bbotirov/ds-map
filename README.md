@@ -59,10 +59,11 @@ node dist/cli.js doctor
 ```
 
 Он построчно говорит: Node, сборка, Electron, харнес, сессия для текущего cwd,
-сайдкар, настройки. Единственный `✗`, который ничего не ломает — «порт из файла
-не отвечает» после `taskkill /F` лаунчера: файлы `~/.dsh/dsmap-port.txt` и
-`dsmap-token.txt` удаляются при нормальном выходе, а при жёстком убийстве
-остаются, и их надо убрать руками.
+сайдкар, настройки. Файлы `~/.dsh/dsmap-port.txt` и `dsmap-token.txt` удаляются
+при нормальном выходе; если лаунчер убили жёстко (`taskkill /F`, снятие в
+диспетчере задач), их убирает панель — она замечает мёртвый порт через несколько
+секунд, — или расширение VS Code, когда терминал закрыли без Ctrl-C. `✗ «порт из
+файла не отвечает»` после такого убийства поэтому проходит само.
 
 Для Windows удобно положить в `PATH` обёртку вида:
 
@@ -84,7 +85,7 @@ node "C:\путь\к\ds-map\dist\cli.js" run -- dsh --profile headless %*
 
 ```bash
 pnpm package:extension                          # build/ds-map-<version>.vsix
-code --install-extension build/ds-map-0.2.1.vsix
+code --install-extension build/ds-map-0.3.0.vsix
 ```
 
 Готовый `.vsix` лежит в [последнем релизе](https://github.com/Bbotirov/ds-map/releases/latest).
@@ -93,9 +94,12 @@ code --install-extension build/ds-map-0.2.1.vsix
 
 Расширение ничего не читает из сессий и не скачивает: оно только запускает
 локальный CLI. Проверено в настоящем хосте расширений VS Code
-(`extension/test-runner/run.js`): активация, регистрация команд, реальный
-`start` с поднявшимся окном панели и `stop`, после которого не остаётся ни
-терминала, ни окна, ни файлов порта/токена.
+(`extension/test-runner/run.js`), в два цикла: активация, регистрация команд,
+`start` с поднявшимся окном панели и её решением о пристыковке, `stop` настоящим
+`Ctrl-C`, после которого не остаётся ни терминала, ни окна, ни файлов
+порта/токена, — и отдельный цикл на настоящем `dsh`: живой снимок карты плюс
+требование, чтобы контрольный маркер промпта не появился ни в снимке, ни в
+строках лаунчера.
 
 `dsMap.cliPath` и `dsMap.harnessCommand` имеет смысл писать в **User**-settings,
 тогда панели доступны в любом окне, а не только в папке ds-map. Если путь
@@ -154,14 +158,15 @@ dsh ──session.v4.jsonl──► tailer ──route/classify/redact──► 
 ```bash
 pnpm typecheck          # src + extension
 pnpm lint
-pnpm test               # vitest, 17 файлов
+pnpm test               # vitest, 18 файлов / 346 тестов
 pnpm test:coverage      # покрытие core/ >= 80% (порог в vitest.config.ts)
 pnpm build              # dist/ для CLI и окна
 pnpm package:extension  # .vsix
 ```
 
 Прогон расширения в настоящем хосте VS Code (не юнит-тест, а реальный
-`Code.exe`):
+`Code.exe`; нужны свежие `dist/` и `build/extension`, то есть `pnpm build` и
+`pnpm package:extension` перед ним):
 
 ```bash
 code --user-data-dir <пустая папка> --disable-workspace-trust \
@@ -169,9 +174,12 @@ code --user-data-dir <пустая папка> --disable-workspace-trust \
   --extensionTestsPath "<repo>/extension/test-runner/run.js" "<repo>"
 ```
 
-Тест поднимает панель, гасит её настоящим `Ctrl-C` и проверяет, что не осталось
-ни терминала, ни окна, ни файлов порта/токена; настройки он возвращает к `undef`,
-чтобы прогоны не наследовали друг друга.
+Тест поднимает панель, читает её строку о пристыковке, гасит настоящим `Ctrl-C`
+и проверяет, что не осталось ни терминала, ни окна, ни файлов порта/токена;
+настройки он возвращает к `undef`, чтобы прогоны не наследовали друг друга.
+Отчёт пишется в `build/extension-tests.log` (`DSMAP_TEST_REPORT` перебивает
+путь) — самого вывода `Code.exe` при «пристыковке» к открытому окну хватает не
+всегда.
 
 ## Лицензия
 
