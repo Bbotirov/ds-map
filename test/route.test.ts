@@ -96,11 +96,11 @@ describe('контекст', () => {
 })
 
 describe('EventMapper: карта записей харнеса', () => {
-  it('session → session.start с id и cwd верхнего уровня', () => {
+  it('session → session.start: id и имя папки, без пути целиком (§12)', () => {
     const e = first(new EventMapper(), { type: 'session', id: 'session-abc', cwd: 'c:\\proj', time: 5 }) as Record<string, unknown>
     expect(e.t).toBe('session.start')
     expect(e.session).toBe('session-abc')
-    expect(e.cwd).toBe('c:\\proj')
+    expect(e.cwd).toBe('proj')
     expect(e.ts).toBe(5)
   })
 
@@ -228,6 +228,48 @@ describe('EventMapper: карта записей харнеса', () => {
     expect(end.t).toBe('job.end')
     expect(end.ms).toBe(30_000)
     expect(end.status).toBe('ok')
+  })
+
+  it('метка фоновой задачи — имя команды, а не командная строка (§12)', () => {
+    const mapper = new EventMapper()
+    const start = first(
+      mapper,
+      rec('job/registered', {
+        jobId: 'j3',
+        kind: 'pwsh',
+        label: 'Get-ChildItem -File | Select-Object -First 5',
+        startedAt: 1_000,
+      }, { time: 1_000 }),
+    ) as JobStartEvent
+    expect(start.label).toBe('get-childitem')
+    expect(start.label).not.toContain('Select-Object')
+    expect(start.label).not.toContain('|')
+
+    const fileJob = first(
+      new EventMapper(),
+      rec('job/registered', { jobId: 'j4', kind: 'read', label: 'C:/repo/src/core/route.ts', startedAt: 1 }, { time: 1 }),
+    ) as JobStartEvent
+    expect(fileJob.label).toBe('core/route.ts')
+
+    const urlJob = first(
+      new EventMapper(),
+      rec('job/registered', { jobId: 'j5', kind: 'browser_navigate', label: 'https://example.com/a/b?q=secret', startedAt: 1 }, { time: 1 }),
+    ) as JobStartEvent
+    expect(urlJob.label).toBe('example.com')
+
+    const noKind = first(new EventMapper(), rec('job/registered', { jobId: 'j6', label: 'plain', startedAt: 1 }, { time: 1 })) as JobStartEvent
+    expect(noKind.label).toBe('job')
+  })
+
+  it('job/settled со статусом completed из живой сессии — не ошибка', () => {
+    const mapper = new EventMapper()
+    mapper.map(rec('job/registered', { jobId: 'j7', kind: 'pwsh', label: '$files', startedAt: 1_000 }, { time: 1_000 }))
+    const end = first(
+      mapper,
+      rec('job/settled', { jobId: 'j7', kind: 'pwsh', label: '$files', startedAt: 1_000, finishedAt: 2_600, status: 'completed', cause: 'producer' }, { time: 2_600 }),
+    ) as JobEndEvent
+    expect(end.status).toBe('ok')
+    expect(end.ms).toBe(1_600)
   })
 
   it('провал фоновой задачи — err', () => {

@@ -12,7 +12,8 @@
 import { safe, fileLabel, commandLabel, urlLabel, clean } from './redact.js'
 import { classifyTool, type Station } from './classify.js'
 import type {
-  DsMapEvent, ContextReading, ToolStatus, SessionStartEvent, PromptEvent, ModelStepEvent,
+  DsMapEvent, ContextReading, ToolStatus, SessionStartEvent, TurnStartEvent, PromptEvent, ModelStepEvent,
+  ModelThinkEvent, ModelRetryEvent, GuardSetEvent, AgentMsgEvent,
   ToolStartEvent, ToolEndEvent, AnswerEvent, ContextUpdateEvent, ModelSwitchEvent,
   JobStartEvent, JobEndEvent, CompactionEvent,
 } from './events.js'
@@ -80,11 +81,40 @@ function num(v: unknown): number {
 // --- конструкторы событий (экспортированы для тестов и других источников) ---
 
 export function sessionStart(raw: RawSession, ts = Date.now()): SessionStartEvent {
-  return { v: 1, t: 'session.start', ts, session: raw.id, model: raw.model, cwd: raw.cwd }
+  return { v: 1, t: 'session.start', ts, session: clean(raw.id) || 'unknown', model: clean(raw.model) || 'unknown', cwd: dirLabel(raw.cwd) }
+}
+
+/**
+ * Имя папки, а не путь целиком: панель лежит справа от окна и видна не только
+ * хозяину, а полный путь выдаёт структуру диска (§12.2).
+ */
+function dirLabel(cwd: string): string {
+  const parts = cwd.split(/[\\/]+/).filter(Boolean)
+  return clean(parts[parts.length - 1] || '')
 }
 
 export function prompt(chars: number, ts = Date.now()): PromptEvent {
   return { v: 1, t: 'prompt', ts, chars }
+}
+
+export function turnStart(turn: number, ts = Date.now()): TurnStartEvent {
+  return { v: 1, t: 'turn.start', ts, turn }
+}
+
+export function modelThink(ms: number, ts = Date.now()): ModelThinkEvent {
+  return { v: 1, t: 'model.think', ts, ms }
+}
+
+export function modelRetry(attempt: number, of: number, delayMs: number, ts = Date.now()): ModelRetryEvent {
+  return { v: 1, t: 'model.retry', ts, attempt, of, delayMs }
+}
+
+export function guardSet(kind: GuardSetEvent['kind'], label: string, ts = Date.now()): GuardSetEvent {
+  return { v: 1, t: 'guard.set', ts, kind, label: clean(label) || kind }
+}
+
+export function agentMsg(inserted: number, ts = Date.now()): AgentMsgEvent {
+  return { v: 1, t: 'agent.msg', ts, inserted }
 }
 
 export function modelStep(context: ContextReading, ts = Date.now()): ModelStepEvent {
@@ -100,7 +130,7 @@ export function answer(ms: number, status: AnswerEvent['status'] = 'ok', ts = Da
 }
 
 export function modelSwitch(from: string, to: string, ts = Date.now()): ModelSwitchEvent {
-  return { v: 1, t: 'model.switch', ts, from, to }
+  return { v: 1, t: 'model.switch', ts, from: clean(from), to: clean(to) }
 }
 
 export function compaction(phase: CompactionEvent['phase'], ms: number, ts = Date.now()): CompactionEvent {
@@ -147,18 +177,19 @@ export function mapLabel(name: string, args: string | Record<string, unknown> | 
  * а не исключение наверх (§7 правило 10).
  */
 export function toolStart(raw: RawToolCall, ts = Date.now()): ToolStartEvent {
+  const name = clean(raw.name) || 'tool'
   return safe(() => {
     const station = classifyTool(raw.name, commandOf(raw))
     return {
       v: 1,
       t: 'tool.start',
       ts,
-      id: raw.callId || nextCallId(),
-      name: raw.name,
+      id: clean(raw.callId) || nextCallId(),
+      name,
       station,
       label: mapLabel(raw.name, raw.arguments),
     }
-  }, { v: 1, t: 'tool.start', ts, id: raw.callId || nextCallId(), name: raw.name, station: 'shell', label: 'unknown' })
+  }, { v: 1, t: 'tool.start', ts, id: clean(raw.callId) || nextCallId(), name, station: 'shell', label: 'unknown' })
 }
 
 /** Текст команды внутри вызова — он определяет станцию для шелл-инструментов. */
@@ -174,19 +205,20 @@ export function toolEnd(
   open: { name: string; station: Station; label: string; startedAt: number } | undefined,
   ts = Date.now(),
 ): ToolEndEvent {
+  const id = clean(raw.toolCallId) || nextCallId()
   return safe(
     () => ({
       v: 1,
       t: 'tool.end',
       ts,
-      id: raw.toolCallId,
-      name: open?.name ?? raw.toolCallId,
+      id,
+      name: open?.name ?? (clean(raw.toolCallId) || 'tool'),
       station: open?.station ?? 'shell',
       label: open?.label ?? 'unknown',
       status: (open ? (raw.isError ? 'err' : 'ok') : 'unknown') as ToolStatus,
       ms: open ? Math.max(0, ts - open.startedAt) : 0,
     }),
-    { v: 1, t: 'tool.end', ts, id: raw.toolCallId, name: raw.toolCallId, station: 'shell', label: 'unknown', status: 'unknown', ms: 0 },
+    { v: 1, t: 'tool.end', ts, id, name: clean(raw.toolCallId) || 'tool', station: 'shell', label: 'unknown', status: 'unknown', ms: 0 },
   )
 }
 
@@ -222,6 +254,7 @@ export class EventMapper {
   private contextWindow = 0
   private context: ContextReading | null = null
   private turnStartedAt = new Map<number, number>()
+  private stepStartedAt = new Map<string, number>()
   private compactionStartedAt = new Map<string, number>()
   private model = ''
   private chars = 0
@@ -240,13 +273,23 @@ export class EventMapper {
 
       case 'turn/start':
         this.turnStartedAt.set(num(data.turn), ts)
-        return []
+        return [turnStart(num(data.turn), ts)]
 
       case 'turn/end':
         return this.onTurnEnd(data, ts)
 
       case 'step/start':
+        this.stepStartedAt.set(stepKey(data), ts)
         return this.onStep(ts)
+
+      case 'step/end': {
+        const started = this.stepStartedAt.get(stepKey(data))
+        this.stepStartedAt.delete(stepKey(data))
+        return [modelThink(started ? Math.max(0, ts - started) : 0, ts)]
+      }
+
+      case 'llm/retry':
+        return this.onLlmRetry(data, ts)
 
       case 'user/message':
         this.chars += textLength(data.content)
@@ -255,13 +298,26 @@ export class EventMapper {
       case 'assistant/message': {
         const usage = data.usage as Record<string, unknown> | undefined
         this.chars += textLength(data.message)
+        const before = this.context
         const next = contextFromUsage(usage, this.contextWindow)
         if (next) this.context = next
-        return []
+        return this.contextChanged(before, ts)
       }
 
       case 'request/context':
-        return this.onRequestContext(data)
+        return this.onRequestContext(data, ts)
+
+      case 'permission/preset':
+        return [guardSet('permission', str(data.preset), ts)]
+
+      case 'sandbox/mode':
+        return [guardSet('sandbox', str(data.mode), ts)]
+
+      case 'approval/policy':
+        return [guardSet('approval', str(data.policy), ts)]
+
+      case 'agent/inbox/spliced':
+        return [agentMsg(num(data.inserted), ts)]
 
       case 'model/selection':
         return this.onModelSelection(data, ts)
@@ -274,7 +330,7 @@ export class EventMapper {
         return this.onCompactionEnd(data, ts)
 
       case 'job/registered':
-        return [jobStart(str(data.jobId) || nextCallId(), stationOfJob(data), clean(str(data.label)) || 'job', ts)]
+        return [jobStart(str(data.jobId) || nextCallId(), stationOfJob(data), jobLabel(data), ts)]
 
       case 'job/settled':
         return this.onJobSettled(data, ts)
@@ -321,20 +377,35 @@ export class EventMapper {
     return [prompt(textLength(data.content), ts)]
   }
 
-  private onRequestContext(data: Record<string, unknown>): DsMapEvent[] {
+  private onRequestContext(data: Record<string, unknown>, ts: number): DsMapEvent[] {
     const window = num(data.contextWindow)
     if (window <= 0) return []
+    const before = this.context
     this.contextWindow = window
     if (!this.model) this.model = str(data.model)
     // Окно известно, а заполнения ещё нет — допустима оценка по объёму.
     if (!this.context) this.context = estimateContext(this.chars, window)
-    return []
+    return this.contextChanged(before, ts)
+  }
+
+  /**
+   * Кольцо контекста живёт на отдельном событии: UI иначе не знает, что
+   * заполнение изменилось между шагами модели. Событие даёт только числа.
+   */
+  private contextChanged(before: ContextReading | null, ts: number): DsMapEvent[] {
+    const now = this.context
+    if (!now || (before && before.used === now.used && before.max === now.max)) return []
+    return [contextUpdate(now, ts)]
+  }
+
+  private onLlmRetry(data: Record<string, unknown>, ts: number): DsMapEvent[] {
+    return [modelRetry(num(data.retry), num(data.maxRetries), Math.round(num(data.delayMs)), ts)]
   }
 
   private onModelSelection(data: Record<string, unknown>, ts: number): DsMapEvent[] {
-    const provider = str(data.provider)
+    const provider = clean(str(data.provider))
     const rawModel = data.model
-    const name = typeof rawModel === 'string' ? rawModel : modelFromObject(rawModel)
+    const name = clean(typeof rawModel === 'string' ? rawModel : modelFromObject(rawModel))
     if (!name) return []
     const full = provider && !name.includes('/') ? `${provider}/${name}` : name
     const from = this.model
@@ -361,7 +432,7 @@ export class EventMapper {
       jobEnd(
         str(data.jobId) || nextCallId(),
         stationOfJob(data),
-        status === 'ok' || status === 'settled' ? 'ok' : status ? 'err' : 'unknown',
+        JOB_DONE.has(status) ? 'ok' : status ? 'err' : 'unknown',
         startedAt && finishedAt ? Math.max(0, finishedAt - startedAt) : 0,
         ts,
       ),
@@ -415,6 +486,7 @@ export class EventMapper {
   reset(): void {
     this.open.clear()
     this.turnStartedAt.clear()
+    this.stepStartedAt.clear()
     this.compactionStartedAt.clear()
     this.context = null
     this.contextWindow = 0
@@ -422,11 +494,43 @@ export class EventMapper {
   }
 }
 
+/**
+ * Исходы фоновой задачи, которые харнес считает успехом. В живых сессиях
+ * встречается `completed`; `failed`/`aborted` остаются ошибкой.
+ */
+const JOB_DONE = new Set(['ok', 'settled', 'completed'])
+
 /** Фоновые задачи харнеса: `kind` — имя инструмента, который их породил. */
 function stationOfJob(data: Record<string, unknown>): Station {
   const kind = str(data.kind)
   if (!kind) return 'agents'
   return classifyTool(kind)
+}
+
+/**
+ * Метка фоновой задачи. Харнес пишет в `label` строку целиком: для шелла это
+ * командная строка, которую показывать нельзя (§12.2). Поэтому label проходит
+ * тот же путь, что и аргументы вызова, — остаётся имя команды, файла или хост.
+ */
+function jobLabel(data: Record<string, unknown>): string {
+  const kind = str(data.kind)
+  const label = str(data.label)
+  const fallback = clean(kind) || 'job'
+  if (!kind || !label) return fallback
+  const named = mapLabel(kind, {
+    command: label,
+    file_path: label,
+    path: label,
+    url: label,
+    description: label,
+    name: label,
+  })
+  return named || fallback
+}
+
+/** Шаг харнеса задаётся парой ход+шаг: один `step` нумеруется внутри хода. */
+function stepKey(data: Record<string, unknown>): string {
+  return `${num(data.turn)}:${num(data.step)}`
 }
 
 function modelFromObject(raw: unknown): string {

@@ -24,8 +24,11 @@ export type ToolStatus = 'ok' | 'err' | 'unknown'
 
 export type EventType =
   | 'session.start'
+  | 'turn.start'
   | 'prompt'
   | 'model.step'
+  | 'model.think'
+  | 'model.retry'
   | 'tool.start'
   | 'tool.end'
   | 'answer'
@@ -34,6 +37,8 @@ export type EventType =
   | 'job.start'
   | 'job.end'
   | 'compaction'
+  | 'guard.set'
+  | 'agent.msg'
 
 export interface BaseEvent {
   v: 1
@@ -53,9 +58,36 @@ export interface PromptEvent extends BaseEvent {
   chars: number
 }
 
+/** Начало хода: пользователь спросил, модель ещё не ответила. */
+export interface TurnStartEvent extends BaseEvent {
+  t: 'turn.start'
+  turn: number
+}
+
 export interface ModelStepEvent extends BaseEvent {
   t: 'model.step'
   context: ContextReading
+}
+
+/**
+ * Шаг модели закончился: `ms` — сколько модель думала над этим шагом.
+ * Харнес пишет `step/end` отдельно, поэтому длительность считается по паре
+ * `step/start` → `step/end`, а не по времени разбора.
+ */
+export interface ModelThinkEvent extends BaseEvent {
+  t: 'model.think'
+  ms: number
+}
+
+/**
+ * Повтор запроса к модели. Текст ошибки харнес кладёт в `failure.message` —
+ * он не уходит в UI никогда; наружу идут только номер попытки и задержка.
+ */
+export interface ModelRetryEvent extends BaseEvent {
+  t: 'model.retry'
+  attempt: number
+  of: number
+  delayMs: number
 }
 
 /**
@@ -133,10 +165,33 @@ export interface CompactionEvent extends BaseEvent {
   ms: number
 }
 
+/**
+ * Харнес меняет правила доступа: пресет разрешений, режим песочницы или
+ * политику подтверждений. Это станция `hooks` — всё, что решает, можно ли
+ * действие вообще. `label` — имя правила из конфига, не содержимое работы.
+ */
+export interface GuardSetEvent extends BaseEvent {
+  t: 'guard.set'
+  kind: 'permission' | 'sandbox' | 'approval'
+  label: string
+}
+
+/**
+ * Входящее от другого агента (пересылка в очередь субагента). Наружу выходит
+ * только число вставленных сообщений: тела писем в лог харнеса кладет целиком.
+ */
+export interface AgentMsgEvent extends BaseEvent {
+  t: 'agent.msg'
+  inserted: number
+}
+
 export type DsMapEvent =
   | SessionStartEvent
+  | TurnStartEvent
   | PromptEvent
   | ModelStepEvent
+  | ModelThinkEvent
+  | ModelRetryEvent
   | ToolStartEvent
   | ToolEndEvent
   | AnswerEvent
@@ -145,6 +200,8 @@ export type DsMapEvent =
   | JobStartEvent
   | JobEndEvent
   | CompactionEvent
+  | GuardSetEvent
+  | AgentMsgEvent
 
 export function isToolStart(e: DsMapEvent): e is ToolStartEvent {
   return e.t === 'tool.start'
