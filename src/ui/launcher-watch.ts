@@ -88,3 +88,23 @@ export async function probeSidecar(port: number, timeoutMs = 700): Promise<boole
     return false
   }
 }
+
+/**
+ * GET с токеном: `200` отвечает только наш живой сайдкар. Нужен именно этот
+ * ответ, когда решается вопрос «удалять ли файлы порта и токена»: порт мог
+ * достаться чужому процессу, и тогда файлы мусорные, а мог на секунду
+ * заглючить у антивируса, и тогда их трогать нельзя.
+ */
+export async function probeEndpoint(endpoint: Endpoint, timeoutMs = 700): Promise<boolean> {
+  if (!Number.isInteger(endpoint.port) || endpoint.port <= 0 || endpoint.port > 65535) return false
+  if (!endpoint.token) return false
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:${endpoint.port}/?token=${encodeURIComponent(endpoint.token)}`,
+      { signal: AbortSignal.timeout(timeoutMs) },
+    )
+    return res.ok
+  } catch {
+    return false
+  }
+}

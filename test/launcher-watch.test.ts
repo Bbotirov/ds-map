@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import http from 'node:http'
-import { probeSidecar, startLauncherWatch, type GoneReason } from '../src/ui/launcher-watch.js'
+import { probeEndpoint, probeSidecar, startLauncherWatch, type GoneReason } from '../src/ui/launcher-watch.js'
 import type { Endpoint } from '../src/shared/config.js'
 
 beforeEach(() => {
@@ -123,5 +123,40 @@ describe('probeSidecar', () => {
     await expect(probeSidecar(1, 200)).resolves.toBe(false)
     await expect(probeSidecar(0)).resolves.toBe(false)
     await expect(probeSidecar(Number.NaN)).resolves.toBe(false)
+  })
+})
+
+describe('probeEndpoint', () => {
+  beforeEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** Живой сайдкар из `server.ts`: свой токен — 200, чужой — 403. */
+  async function serve(expectedToken: string): Promise<{ port: number; close(): Promise<void> }> {
+    const server = http.createServer((req, res) => {
+      const given = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('token')
+      res.writeHead(given === expectedToken ? 200 : 403)
+      res.end(given === expectedToken ? 'ds-map daemon\n' : 'forbidden\n')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+    return { port, close: () => new Promise<void>((r) => server.close(() => r())) }
+  }
+
+  it('отвечает наш токен — значит сайдкар жив', async () => {
+    const s = await serve('tok-1')
+    await expect(probeEndpoint({ port: s.port, token: 'tok-1' })).resolves.toBe(true)
+    await s.close()
+  })
+
+  it('порт занят чужим процессом — это не наш сайдкар', async () => {
+    const s = await serve('tok-1')
+    await expect(probeEndpoint({ port: s.port, token: 'tok-чужой' })).resolves.toBe(false)
+    await s.close()
+  })
+
+  it('мёртвый порт и пустой токен — false без исключения', async () => {
+    await expect(probeEndpoint({ port: 1, token: 't' }, 200)).resolves.toBe(false)
+    await expect(probeEndpoint({ port: 4321, token: '' })).resolves.toBe(false)
   })
 })

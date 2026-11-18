@@ -64,6 +64,61 @@ export function readEndpoint(read: (p: string) => string, home = dshHome()): End
   }
 }
 
+export interface StaleDeps {
+  home?: string
+  /** Ответ сайта `200` = сайдкар жив. Подменяется в тестах. */
+  probe?: (url: string, timeoutMs: number) => Promise<boolean>
+  remove?: (p: string) => void
+  timeoutMs?: number
+}
+
+/**
+ * Убирает порт и токен мёртвого сайдкара: §12.4 требует, чтобы между сессиями
+ * ничего не оставалось, а честный cleanup лаунчера срабатывает только когда до
+ * него дошёл Ctrl-C. На Windows `sendText('\x03')` — синтетический ввод в
+ * ConPTY, он не всегда превращается в CTRL_C_EVENT, а `dispose()` терминала
+ * снимает всё дерево уже без хуков Node. Поэтому удаляем пару файлов, только
+ * когда на записанном порту никто не отвечает нашим токеном: живой запуск —
+ * свой или параллельный — под защитой, а порт, отданный чужому процессу, с
+ * нашим токеном 200 не вернёт.
+ */
+export async function clearStaleEndpoint(deps: StaleDeps = {}): Promise<boolean> {
+  const home = deps.home ?? dshHome()
+  const probe = deps.probe ?? probeSidecar
+  const remove = deps.remove ?? ((p: string) => fs.rmSync(p, { force: true }))
+  const endpoint = readEndpoint((p) => fs.readFileSync(p, 'utf8'), home)
+  if (!endpoint) return false
+  const url = `http://127.0.0.1:${endpoint.port}/?token=${encodeURIComponent(endpoint.token)}`
+  if (await probe(url, deps.timeoutMs ?? 1_500)) return false
+
+  // Перечитываем перед удалением: если за время пробы поднялся новый лаунчер,
+  // в файлах уже его значения и трогать их нельзя.
+  let removed = false
+  for (const [file, value] of [
+    [portPath(home), String(endpoint.port)],
+    [tokenPath(home), endpoint.token],
+  ] as const) {
+    try {
+      if (fs.readFileSync(file, 'utf8').trim() === value) {
+        remove(file)
+        removed = true
+      }
+    } catch {
+      // файла уже нет — убирать нечего
+    }
+  }
+  return removed
+}
+
+async function probeSidecar(url: string, timeoutMs: number): Promise<boolean> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 export interface UiConfig {
   theme: 'dark' | 'light'
   lang: 'ru' | 'en'

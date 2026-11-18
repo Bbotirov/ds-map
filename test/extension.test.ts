@@ -5,6 +5,7 @@ import * as path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AutoOpen } from '../extension/src/auto-open.js'
+import { clearStaleEndpoint } from '../extension/src/endpoint.js'
 import { ASSETS, renderDocument } from '../extension/src/map-html.js'
 import {
   DockHeartbeat,
@@ -27,10 +28,12 @@ type FakeView = import('./mocks/vscode.js').FakeWebviewView
 const existingCli = path.resolve('package.json')
 const builtCli = path.resolve('dist', 'cli.js')
 const manifest = JSON.parse(fs.readFileSync(path.resolve('extension', 'package.json'), 'utf8')) as {
+  activationEvents?: string[]
   contributes: {
     commands: { command: string }[]
     views: Record<string, { id: string; type: string; name: string }[]>
     viewsContainers: Record<string, { id: string }[]>
+    configuration: { properties: Record<string, { default?: unknown }> }
   }
 }
 
@@ -137,6 +140,9 @@ describe('расширение VS Code', () => {
     // Панель переживает переключение таба: пересобирать кольцо на каждый клик — мигание.
     expect(recorded.retained).toBe(true)
     expect(declared).toEqual(expect.arrayContaining(['dsMap.start', 'dsMap.stop', 'dsMap.doctor']))
+    // Автооткрытие опрашивает живые сессии таймером: без активации на старте
+    // окна таймера нет, и вкладка сама никогда не появится.
+    expect(manifest.activationEvents).toContain('onStartupFinished')
   })
 
   it('start поднимает харнес через лаунчер в терминале', async () => {
@@ -152,6 +158,21 @@ describe('расширение VS Code', () => {
       text: `node "${existingCli}" run -- dsh --profile web`,
     })
     expect(find('show')).toBeTruthy()
+  })
+
+  it('без настройки берётся профиль, который вообще стартует', async () => {
+    // `dsh` без `--profile` печатает usage и выходит с кодом 1: дефолт обязан
+    // быть рабочим, иначе «запустить панель» = пустой терминал.
+    mock.settings['dsMap.cliPath'] = existingCli
+    delete mock.settings['dsMap.harnessCommand']
+
+    await run('dsMap.start')
+
+    expect(find('sendText')).toMatchObject({ text: `node "${existingCli}" run -- dsh --profile web` })
+    // Дефолт в коде и в package.json — одно и то же, иначе подпись настройки врёт.
+    expect(manifest.contributes.configuration.properties['dsMap.harnessCommand'].default).toBe(
+      'dsh --profile web',
+    )
   })
 
   it('второй start не поднимает второй терминал, а показывает существующий', async () => {
@@ -237,6 +258,69 @@ describe('расширение VS Code', () => {
 
     expect(focus).toHaveBeenCalled()
   })
+})
+
+describe('уборка порта и токена (§12.4)', () => {
+  const put = (port: string, token: string): void => {
+    fs.writeFileSync(path.join(home, 'dsmap-port.txt'), port)
+    fs.writeFileSync(path.join(home, 'dsmap-token.txt'), token)
+  }
+
+  it('мёртвый сайдкар: пара файлов уходит', async () => {
+    put('41999', 'tok-dead')
+    const removed = await clearStaleEndpoint({ probe: async () => false })
+
+    expect(removed).toBe(true)
+    expect(fs.existsSync(path.join(home, 'dsmap-port.txt'))).toBe(false)
+    expect(fs.existsSync(path.join(home, 'dsmap-token.txt'))).toBe(false)
+  })
+
+  it('живой сайдкар: файлы не трогаем', async () => {
+    put('41999', 'tok-live')
+    const removed = await clearStaleEndpoint({ probe: async () => true })
+
+    expect(removed).toBe(false)
+    expect(fs.readFileSync(path.join(home, 'dsmap-port.txt'), 'utf8')).toBe('41999')
+  })
+
+  it('за время пробы поднялся новый лаунчер — чужие значения остаются', async () => {
+    put('41999', 'tok-dead')
+    const removed = await clearStaleEndpoint({
+      probe: async () => {
+        put('42000', 'tok-new')
+        return false
+      },
+    })
+
+    expect(removed).toBe(false)
+    expect(fs.readFileSync(path.join(home, 'dsmap-port.txt'), 'utf8')).toBe('42000')
+  })
+
+  it('битая пара или пустой каталог — без исключения', async () => {
+    put('не-порт', '')
+    await expect(clearStaleEndpoint({ probe: async () => false })).resolves.toBe(false)
+
+    fs.rmSync(path.join(home, 'dsmap-token.txt'))
+    await expect(clearStaleEndpoint({ probe: async () => false })).resolves.toBe(false)
+  })
+
+  it(
+    'закрытый терминал гасит следы мёртвого сайдкара по-настоящему',
+    async () => {
+      // Без подмен: проверка идёт на 127.0.0.1 в несуществующий порт, ответа нет,
+      // и расширение обязано убрать файлы само — этого требует §12.4.
+      mock.settings['dsMap.cliPath'] = existingCli
+      put('1', 'tok-orphan')
+      await run('dsMap.start')
+      await run('dsMap.stop')
+      // `stop` снимает терминал через 2 с, уборка — уже в событии закрытия.
+      await flush(2_600)
+
+      expect(fs.existsSync(path.join(home, 'dsmap-port.txt'))).toBe(false)
+      expect(fs.existsSync(path.join(home, 'dsmap-token.txt'))).toBe(false)
+    },
+    20_000,
+  )
 })
 
 describe('мост host → webview', () => {

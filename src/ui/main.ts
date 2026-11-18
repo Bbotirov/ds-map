@@ -10,8 +10,8 @@ import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
 import { computePanelBounds, WindowWatcher, type WatcherState, type WindowBounds } from './window.js'
-import { probeSidecar, startLauncherWatch } from './launcher-watch.js'
-import { normalizeConfig, readConfig, readEndpoint, writeConfig, type DsMapConfig, type Endpoint } from '../shared/config.js'
+import { probeEndpoint, probeSidecar, startLauncherWatch } from './launcher-watch.js'
+import { clearEndpointFiles, normalizeConfig, readConfig, readEndpoint, writeConfig, type DsMapConfig, type Endpoint } from '../shared/config.js'
 
 const { app, BrowserWindow, screen, ipcMain, Menu } = electron
 
@@ -158,9 +158,27 @@ function watchLauncher(): void {
           ? '[ds-map] лаунчер завершился — панель закрывается'
           : '[ds-map] сайдкар не отвечает — панель закрывается',
       )
+      if (reason === 'port-dead') {
+        // Порт молчит, а файлы на месте — значит лаунчер убили жёстко
+        // (`taskkill /F`, снятый диспетчером задач): свой cleanup он сделать не
+        // мог. Панель — последний живой свидетель и убирает их сама (§12.4).
+        void clearDeadSidecar().then(
+          () => app.quit(),
+          () => app.quit(),
+        )
+        return
+      }
       app.quit()
     },
   })
+}
+
+/** Удаляет порт и токен только если на записанном порту действительно никого. */
+async function clearDeadSidecar(): Promise<void> {
+  const dead = resolveEndpoint()
+  if (!dead) return
+  if (await probeEndpoint(dead)) return
+  clearEndpointFiles(dead)
 }
 
 function startWatching(pids: number[], hwnd: number): void {
@@ -192,6 +210,9 @@ function applyState(state: WatcherState): void {
     if (panel?.isVisible()) {
       panel.hide()
       hiddenWithHarness = true
+      // Без этой строки панель просто исчезает, и непонятно, что она жива и
+      // ждёт, пока вернут окно харнеса.
+      console.log(`[ds-map] окно харнеса свёрнуто — панель спрятана (якорь: ${anchorLabel || 'ещё не найден'})`)
     }
     return
   }

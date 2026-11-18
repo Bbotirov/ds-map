@@ -17,7 +17,7 @@ import * as vscode from 'vscode'
 
 import { AutoOpen } from './auto-open.js'
 import { findCliPath, type CliLookup } from './cli-lookup.js'
-import { dshHome, sessionsRoot } from './endpoint.js'
+import { clearStaleEndpoint, dshHome, sessionsRoot } from './endpoint.js'
 import { renderDocument } from './map-html.js'
 import { FOCUS_COMMAND, MapViewProvider, VIEW_ID } from './map-view.js'
 import { isLive, listSessions, relativeTime, type SessionEntry } from './sessions.js'
@@ -61,6 +61,15 @@ export function activate(context: vscode.ExtensionContext): void {
       if (closed !== terminal) return
       terminal = undefined
       renderStatus(false)
+      // Терминал мог умереть без Ctrl-C: закрыли вручную, перезагрузка окна.
+      // Тогда лаунчер свой cleanup не успевает сделать и в `~/.dsh` остаётся
+      // порт и токен мёртвого сайдкара.
+      void clearStaleEndpoint().then(
+        (removed) => {
+          if (removed) safeLog('убраны порт и токен мёртвого сайдкара')
+        },
+        () => safeLog('уборка эндпоинта не выполнена'),
+      )
     }),
   )
 
@@ -120,7 +129,7 @@ async function start(context: vscode.ExtensionContext): Promise<void> {
   if (!cli) {
     const pick = 'Указать путь к dsmap'
     const choice = await vscode.window.showErrorMessage(
-      'ds-map не найден: нужна собранный пакет с dist/cli.js (pnpm install && pnpm build).',
+      'ds-map не найден: нужен собранный пакет с dist/cli.js (pnpm install && pnpm build).',
       pick,
     )
     if (choice === pick) {
@@ -129,7 +138,8 @@ async function start(context: vscode.ExtensionContext): Promise<void> {
     return
   }
 
-  const harness = config().get<string>('harnessCommand', 'dsh')
+  // `dsh` без профиля сразу выходит с ошибкой, поэтому дефолт — долгий профиль.
+  const harness = config().get<string>('harnessCommand', 'dsh --profile web')
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
   terminal = vscode.window.createTerminal({ name: 'ds-map', cwd })
   // Кавычки — как в cmd: аргументы харнеса передаются как есть, экранирование
