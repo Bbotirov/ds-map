@@ -65,6 +65,10 @@ pnpm package:extension            # build/ds-map-<version>.vsix
 code --install-extension build/ds-map-0.2.0.vsix
 ```
 
+Готовый `.vsix` лежит в [релизе v0.2.0](https://github.com/Bbotirov/ds-map/releases/tag/v0.2.0).
+В Marketplace расширение не опубликовано: для этого нужны аккаунт издателя и PAT —
+`pnpm exec vsce publish` из собранного каталога (`build/extension`).
+
 Расширение ничего не читает из сессий и не скачивает: оно только запускает
 локальный CLI. Проверено в настоящем хосте расширений VS Code
 (`extension/test-runner/run.js`): активация, регистрация команд, реальный
