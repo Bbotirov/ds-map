@@ -42,6 +42,14 @@ fs.rmSync(stage, { recursive: true, force: true })
 fs.mkdirSync(path.join(stage, 'images'), { recursive: true })
 fs.mkdirSync(path.join(stage, 'out'), { recursive: true })
 fs.cpSync(path.join(ext, 'out'), path.join(stage, 'out'), { recursive: true })
+// WS-клиент для host-а расширения. Глобального WebSocket в Electron старых
+// VS Code нет, поэтому `ws` тащим в .vsix; `dereference` обязателен — pnpm
+// держит пакет за симлинком в .pnpm-дереве.
+fs.mkdirSync(path.join(stage, 'node_modules'), { recursive: true })
+fs.cpSync(path.join(root, 'node_modules', 'ws'), path.join(stage, 'node_modules', 'ws'), {
+  recursive: true,
+  dereference: true,
+})
 fs.copyFileSync(path.join(ext, 'package.json'), path.join(stage, 'package.json'))
 fs.copyFileSync(path.join(ext, '.vscodeignore'), path.join(stage, '.vscodeignore'))
 fs.writeFileSync(path.join(stage, 'images', 'icon.png'), png)

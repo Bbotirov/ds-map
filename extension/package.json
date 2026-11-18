@@ -16,6 +16,9 @@
   "keywords": ["deepseek", "harness", "dsh", "agent", "radar", "privacy", "visualization"],
   "icon": "images/icon.png",
   "main": "./out/extension.js",
+  "dependencies": {
+    "ws": "^8.17.0"
+  },
   "capabilities": {
     "virtualWorkspaces": false,
     "untrustedWorkspaces": {
@@ -24,23 +27,97 @@
     }
   },
   "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "dsMap",
+          "title": "ds-map",
+          "icon": "images/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dsMap": [
+        {
+          "type": "webview",
+          "id": "dsMap.map",
+          "name": "Карта работы ds-map",
+          "icon": "images/icon.svg",
+          "contextualTitle": "ds-map"
+        }
+      ]
+    },
     "commands": [
+      {
+        "command": "dsMap.openMap",
+        "category": "ds-map",
+        "title": "открыть карту",
+        "icon": "$(search-view)"
+      },
+      {
+        "command": "dsMap.pickSession",
+        "category": "ds-map",
+        "title": "выбрать сессию",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "dsMap.copySnapshot",
+        "category": "ds-map",
+        "title": "скопировать снимок карты (JSON)",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "dsMap.browserMap",
+        "category": "ds-map",
+        "title": "карта в браузере",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "dsMap.replayLast",
+        "category": "ds-map",
+        "title": "проиграть последнюю запись",
+        "icon": "$(discard)"
+      },
       {
         "command": "dsMap.start",
         "category": "ds-map",
-        "title": "Start panel with harness"
+        "title": "запустить панель с харнесом"
       },
       {
         "command": "dsMap.stop",
         "category": "ds-map",
-        "title": "Stop panel (send Ctrl-C)"
+        "title": "остановить панель (Ctrl-C)"
       },
       {
         "command": "dsMap.doctor",
         "category": "ds-map",
-        "title": "Run diagnostics"
+        "title": "диагностика"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "dsMap.pickSession",
+          "when": "view == dsMap.map",
+          "group": "1@1"
+        },
+        {
+          "command": "dsMap.replayLast",
+          "when": "view == dsMap.map",
+          "group": "1@2"
+        },
+        {
+          "command": "dsMap.copySnapshot",
+          "when": "view == dsMap.map",
+          "group": "1@3"
+        },
+        {
+          "command": "dsMap.browserMap",
+          "when": "view == dsMap.map",
+          "group": "1@4"
+        }
+      ]
+    },
     "configuration": {
       "title": "ds-map",
       "properties": {
@@ -53,6 +130,11 @@
           "type": "string",
           "default": "dsh",
           "description": "Harness command passed after `dsmap run --`. For example: dsh --profile web"
+        },
+        "dsMap.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the map view once per live harness session. A view you hide yourself stays hidden for that session."
         }
       }
     }
