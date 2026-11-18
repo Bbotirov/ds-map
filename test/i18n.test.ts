@@ -1,30 +1,24 @@
 import { describe, it, expect } from 'vitest'
-import { t, type Language, DICTIONARY } from '../src/ui/i18n.js'
+import { t, DICTIONARY } from '../src/ui/i18n.js'
 
 describe('i18n', () => {
-  it('t возвращает перевод по ключу для ru', () => {
-    expect(t('ru', 'themeDark')).toBe('Тёмная')
-    expect(t('ru', 'themeLight')).toBe('Светлая')
-    expect(t('ru', 'languageRu')).toBe('Русский')
-    expect(t('ru', 'motionFull')).toBe('Полная анимация')
-    expect(t('ru', 'motionReduced')).toBe('Минимум движения')
+  it('returns ru strings', () => {
+    expect(t('ru', 'mapLabel')).toBe('Карта работы агента')
+    expect(t('ru', 'stationFiles')).toBe('Файлы')
+    expect(t('ru', 'stationWeb')).toBe('Сеть')
   })
 
-  it('t возвращает перевод по ключу для en', () => {
-    expect(t('en', 'themeDark')).toBe('Dark')
-    expect(t('en', 'themeLight')).toBe('Light')
-    expect(t('en', 'languageRu')).toBe('Russian')
-    expect(t('en', 'languageEn')).toBe('English')
-    expect(t('en', 'motionFull')).toBe('Full motion')
-    expect(t('en', 'motionReduced')).toBe('Reduced motion')
+  it('returns en strings', () => {
+    expect(t('en', 'mapLabel')).toBe('Agent activity map')
+    expect(t('en', 'stationFiles')).toBe('Files')
+    expect(t('en', 'stationWeb')).toBe('Web')
   })
 
-  it('t возвращает сам ключ, если перевод отсутствует', () => {
-    expect(t('ru', 'unknown.key')).toBe('unknown.key')
-    expect(t('en', 'missing')).toBe('missing')
+  it('falls back to key when missing', () => {
+    expect(t('ru', 'nonexistent.key')).toBe('nonexistent.key')
   })
 
-  it('DICTIONARY содержит все ключи для обоих языков', () => {
+  it('both languages have same keys', () => {
     const ruKeys = Object.keys(DICTIONARY.ru)
     const enKeys = Object.keys(DICTIONARY.en)
     expect(ruKeys.sort()).toEqual(enKeys.sort())

@@ -5,39 +5,87 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ds-map</title>
   <style>
+    /* Цвета берутся из палитры: renderer/palette.ts надувает --dsmap-* на старте.
+       Значения в :root — fallback на первый кадр, до скрипта; он локальный,
+       шрифты и иконки внешние не тянем никогда. */
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
-    body.dark { background: #0a0c11; color: #ebe6dc; }
-    body.light { background: #f5f2ea; color: #1f2228; }
+    :root {
+      --dsmap-background: #0a0c11;
+      --dsmap-node: #12151c;
+      --dsmap-line: #272c36;
+      --dsmap-spoke: #1a1e27;
+      --dsmap-text: #ebe6dc;
+      --dsmap-label: #9ba1ab;
+      --dsmap-faint: #6b7280;
+      --dsmap-accent: #e1ac6e;
+      --dsmap-active: #f0c595;
+      --dsmap-error: #e8654f;
+      --dsmap-memory: #62c7ba;
+      --dsmap-memory-active: #a5e6dc;
+      --dsmap-route: #ebe6dd;
+    }
+    body { background: var(--dsmap-background); color: var(--dsmap-text); font-size: 11px; }
     #app { width: 100%; height: 100%; display: flex; flex-direction: column; }
-    #map { flex: 1; border-bottom: 1px solid var(--line-color); }
-    #feed { height: 120px; overflow-y: auto; font-size: 11px; padding: 6px; }
-    .feed-item { display: flex; gap: 6px; align-items: baseline; margin-bottom: 2px; }
-    .symbol { font-weight: bold; width: 14px; }
-    .status-active .symbol { color: var(--accent-color); }
-    .status-done .symbol { color: var(--faint-color); }
-    .status-error .symbol { color: var(--error-color); }
-    .station { font-size: 10px; color: var(--label-color); width: 70px; flex-shrink: 0; }
-    .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .time { font-size: 10px; color: var(--faint-color); text-align: right; width: 40px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
-    #toolbar { height: 32px; display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--line-color); font-size: 11px; }
-    #toolbar button { background: var(--node-color); border: 1px solid var(--line-color); color: var(--text-color); padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; }
-    #toolbar button:hover { background: var(--line-color); }
-    #status { font-size: 10px; color: var(--error-color); margin-left: auto; }
-    :root { --background-color: #0a0c11; --node-color: #12151c; --line-color: #272c36; --spoke-color: #1a1e27; --text-color: #ebe6dc; --label-color: #9ba1ab; --faint-color: #6b7280; --accent-color: #e1ac6e; --active-color: #f0c595; --error-color: #e8654f; }
-    body.light { --background-color: #f5f2ea; --node-color: #ffffff; --line-color: #cfc9bc; --spoke-color: #e3ded2; --text-color: #1f2228; --label-color: #5f6570; --faint-color: #8b909a; --accent-color: #b8762a; --active-color: #8f560f; --error-color: #c5402b; }
+
+    #toolbar { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--dsmap-line); }
+    #toolbar button {
+      min-width: 62px; padding: 2px 6px; font: inherit; font-size: 10px; cursor: pointer;
+      background: var(--dsmap-node); color: var(--dsmap-text);
+      border: 1px solid var(--dsmap-line); border-radius: 3px;
+    }
+    #toolbar button:hover { border-color: var(--dsmap-label); }
+    #status { margin-left: auto; font-size: 10px; color: var(--dsmap-error); }
+    #toolbar button:focus-visible, #feed-list button:focus-visible { outline: 2px solid var(--dsmap-accent); outline-offset: 1px; }
+
+    #map { flex: 1 1 auto; min-height: 0; }
+    #map svg { display: block; width: 100%; height: 100%; }
+
+    /* Лента: строка «сейчас» + 16 рядов. Колонки рядов и строки «сейчас» совпадают. */
+    #feed { flex: 0 0 auto; display: flex; flex-direction: column; border-top: 1px solid var(--dsmap-line); max-height: 58%; }
+    .feed-now, .feed-item {
+      display: grid;
+      grid-template-columns: 12px 56px minmax(0, 1fr) 22px 44px;
+      gap: 6px;
+      align-items: baseline;
+      padding: 1px 6px;
+    }
+    .feed-now { border-bottom: 1px solid var(--dsmap-line); padding-top: 4px; padding-bottom: 4px; }
+    .feed-list { overflow-y: auto; padding-bottom: 4px; }
+    .symbol { font-weight: 700; text-align: center; }
+    .status-active .symbol { color: var(--dsmap-active); }
+    .status-done .symbol { color: var(--dsmap-label); }
+    .status-error .symbol { color: var(--dsmap-error); }
+    .status-switch .symbol { color: var(--dsmap-memory-active); }
+    .feed-now .symbol { color: var(--dsmap-label); }
+    .feed-now.is-running .symbol { color: var(--dsmap-active); }
+    .station, .now-name, .feed-extra, .time { font-size: 10px; color: var(--dsmap-label); }
+    .station { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .feed-extra, .time { text-align: right; }
+    .time { font-variant-numeric: tabular-nums; }
+    .feed-item .label, .feed-now .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsmap-text); }
+    .feed-item.expanded .label { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; }
+    /* Фоновая работа ждёт отчёт — отметка на поле, чтобы не спорить с контрастом текста. */
+    .feed-item.is-background { box-shadow: inset 2px 0 0 var(--dsmap-label); }
+    .station-name { color: var(--dsmap-label); }
+    .toggle { appearance: none; background: none; border: 0; padding: 0; font: inherit; font-size: 10px; line-height: 1; color: var(--dsmap-label); cursor: pointer; }
+    .toggle:hover { color: var(--dsmap-text); }
+    .feed-empty { padding: 4px 6px; color: var(--dsmap-label); }
   </style>
 </head>
-<body class="dark">
+<body>
   <div id="app">
     <div id="toolbar">
-      <button id="theme-btn">Тёмная</button>
-      <button id="lang-btn">RU</button>
-      <button id="motion-btn">Полная</button>
-      <div id="status">—</div>
+      <button id="theme-btn" type="button">—</button>
+      <button id="lang-btn" type="button">—</button>
+      <button id="motion-btn" type="button">—</button>
+      <div id="status" role="status" aria-live="polite"></div>
     </div>
     <div id="map"></div>
-    <div id="feed"></div>
+    <div id="feed" role="log" aria-live="polite">
+      <div id="feed-now"></div>
+      <div id="feed-list" class="feed-list"></div>
+    </div>
   </div>
   <script type="module">
     import { init } from './renderer/app.js'

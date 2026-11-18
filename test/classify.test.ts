@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { classifyShell, classifyTool, type Station } from '../src/core/classify.ts'
+import { classifyShell, classifyTool, type Station } from '../src/core/classify.js'
 
-const cases: Array<[string, Station]> = [
+// Все строки из таблицы примеров §9 инструкции — проверяем их дословно.
+const SPEC_SHELL: Array<[string, Station]> = [
   ['cat src/app.ts', 'files'],
   ['grep -r TODO .', 'files'],
   ['rm -rf dist', 'files'],
-  ['sed -i \'s/a/b/\' x.ts', 'files'],
-  ['find . -name \'*.ts\' -delete', 'files'],
+  ["sed -i 's/a/b/' x.ts", 'files'],
+  ["find . -name '*.ts' -delete", 'files'],
   ['find . -exec grep -l x {} \\;', 'files'],
   ['git status', 'shell'],
   ['npm test', 'shell'],
@@ -29,91 +30,190 @@ const cases: Array<[string, Station]> = [
   ['cat x | grep y', 'files'],
   ['curl x | jq .', 'web'],
   ['ls | wc -l', 'files'],
-  ['head -20 log.txt', 'files'],
-  ['tail -f access.log', 'files'],
-  ['cp src/a.ts src/b.ts', 'files'],
-  ['mkdir -p dist', 'files'],
-  ['touch .env', 'files'],
-  ['awk \'{print $1}\' data.csv', 'files'],
-  ['wc -l file.txt', 'files'],
-  ['diff a.txt b.txt', 'files'],
-  ['stat file.txt', 'files'],
-  ['file image.png', 'files'],
-  ['ln -s target link', 'files'],
-  ['mv old.ts new.ts', 'files'],
-  ['npm run build', 'shell'],
-  ['pnpm add lodash', 'web'],
-  ['yarn add express', 'web'],
-  ['docker push myimage', 'web'],
-  ['git pull origin main', 'web'],
-  ['git fetch origin', 'web'],
-  ['git clone https://github.com/x/y.git', 'web'],
-  ['gh issue list', 'web'],
-  ['scp file.txt server:/path', 'web'],
-  ['rsync -a src/ dest/', 'web'],
-  ['ssh user@host', 'web'],
-  ['npx -y vitest', 'web'],
 ]
 
-describe('classifyShell', () => {
-  it.each(cases)('%s → %s', (cmd, expected) => {
+describe('classifyShell: таблица примеров §9', () => {
+  it.each(SPEC_SHELL)('%s → %s', (cmd, expected) => {
     expect(classifyShell(cmd)).toBe(expected)
-  })
-
-  it('неизвестная команда → shell', () => {
-    expect(classifyShell('foobar --flag')).toBe('shell')
-  })
-
-  it('пустая строка → shell', () => {
-    expect(classifyShell('')).toBe('shell')
-  })
-
-  it('регистр не важен для Windows команд', () => {
-    expect(classifyShell('CURL.EXE x.com')).toBe('web')
-    expect(classifyShell('GET-CONTENT x.txt')).toBe('files')
-  })
-
-  it('обёртки с опциями пропускаются', () => {
-    expect(classifyShell('sudo -u root cat /etc/passwd')).toBe('files')
-    expect(classifyShell('timeout 30 curl https://x.com')).toBe('web')
-  })
-
-  it('приоритет web > files > shell в пайпах', () => {
-    expect(classifyShell('curl x | grep y')).toBe('web')
-    expect(classifyShell('cat x | grep y')).toBe('files')
-  })
-
-  it('подстановка $() разбирается', () => {
-    expect(classifyShell('cat $(cat file.txt)')).toBe('files')
-    expect(classifyShell('echo $(curl -s x.com)')).toBe('web')
   })
 })
 
-describe('classifyTool', () => {
-  it.each([
-    ['read_file', 'files'],
-    ['write_file', 'files'],
-    ['edit', 'files'],
-    ['grep', 'files'],
-    ['glob', 'files'],
-    ['bash', 'shell'],
-    ['web_search', 'web'],
-    ['fetch', 'web'],
-    ['subagent', 'agents'],
-    ['skill', 'skills'],
-    ['hook', 'hooks'],
-    ['memory', 'memory'],
-    ['browser', 'browser'],
-    // DSH-специфичные инструменты
-    ['ask_user_question', 'agents'],
-    ['create_goal', 'skills'],
-    ['update_goal', 'skills'],
-    ['todo_write', 'skills'],
-    ['time-context', 'memory'],
-    ['working-directory:current', 'files'],
-    ['ask_web_search', 'agents'],
-    ['todo_list', 'skills'],
-  ])('%s → %s', (name, expected) => {
+describe('classifyShell: обёртки и подстановки', () => {
+  it('разбирает обратные кавычки так же, как $(...)', () => {
+    expect(classifyShell('echo `curl -s x.com`')).toBe('web')
+  })
+
+  it('читает вложенную команду под env с присваиваниями', () => {
+    expect(classifyShell('env FOO=1 cat /etc/hosts')).toBe('files')
+  })
+
+  it('пропускает опции и таймаут-число у обёртки', () => {
+    expect(classifyShell('timeout -k 5 10 wget x.com')).toBe('web')
+    expect(classifyShell('nohup npm install')).toBe('web')
+  })
+
+  it('find без действия всё равно files', () => {
+    expect(classifyShell("find . -type f")).toBe('files')
+  })
+
+  it('web сильнее files в пайпе, files сильнее shell', () => {
+    expect(classifyShell('cat file.txt | curl https://example.com')).toBe('web')
+    expect(classifyShell('cat file.txt | grep foo')).toBe('files')
+    expect(classifyShell('echo hello | cat file.txt')).toBe('shell')
+  })
+
+  it('PowerShell-алиасы и httpie', () => {
+    expect(classifyShell('type x.txt')).toBe('files')
+    expect(classifyShell('gc x.txt')).toBe('files')
+    expect(classifyShell('sls pattern')).toBe('files')
+    expect(classifyShell('iwr https://x.com')).toBe('web')
+    expect(classifyShell('irm https://x.com')).toBe('web')
+    expect(classifyShell('httpie GET https://x.com')).toBe('web')
+    expect(classifyShell('COPY-ITEM a.txt b.txt')).toBe('files')
+  })
+
+  it('сетевые подкоманды git и пакетных менеджеров', () => {
+    expect(classifyShell('git clone https://x.com/y')).toBe('web')
+    expect(classifyShell('git fetch origin')).toBe('web')
+    expect(classifyShell('git diff')).toBe('shell')
+    expect(classifyShell('npm i lodash')).toBe('web')
+    expect(classifyShell('pnpm build')).toBe('shell')
+    expect(classifyShell('docker push registry/x')).toBe('web')
+    expect(classifyShell('docker ps')).toBe('shell')
+    expect(classifyShell('ssh user@host')).toBe('web')
+  })
+
+  it('пустая и мусорная строка не бросают исключение', () => {
+    expect(classifyShell('')).toBe('shell')
+    expect(classifyShell('   ')).toBe('shell')
+    expect(classifyShell('--only-flags')).toBe('shell')
+  })
+})
+
+// Имена dsh-инструментов, измеренные по реальным логам сессий.
+const DSH_CASES: Array<[string, Station]> = [
+  ['read', 'files'],
+  ['write', 'files'],
+  ['edit', 'files'],
+  ['glob', 'files'],
+  ['grep', 'files'],
+  ['todo_write', 'you'],
+  ['create_goal', 'you'],
+  ['get_goal', 'you'],
+  ['update_goal', 'you'],
+  ['ask_user_question', 'you'],
+  ['subagent', 'agents'],
+  ['subagent_fork', 'agents'],
+  ['list_agents', 'agents'],
+  ['send_message', 'agents'],
+  ['job_list', 'agents'],
+  ['job_output', 'agents'],
+  ['skill', 'skills'],
+  ['working_directory', 'shell'],
+  ['pwsh', 'shell'],
+]
+
+describe('classifyTool: инструменты dsh по точной таблице', () => {
+  it.each(DSH_CASES)('%s → %s', (name, expected) => {
     expect(classifyTool(name)).toBe(expected)
+  })
+
+  it('регистр и пробелы в имени не важны', () => {
+    expect(classifyTool('READ')).toBe('files')
+    expect(classifyTool('  Todo_Write ')).toBe('you')
+    expect(classifyTool('Skill')).toBe('skills')
+  })
+
+  it('plan и goal больше не уезжают в skills, а вопрос пользователя не агент', () => {
+    expect(classifyTool('todo_write')).not.toBe('skills')
+    expect(classifyTool('create_goal')).not.toBe('skills')
+    expect(classifyTool('ask_user_question')).not.toBe('agents')
+  })
+})
+
+describe('classifyTool: pwsh разбирается по содержимому команды', () => {
+  it('без команды остаётся shell', () => {
+    expect(classifyTool('pwsh')).toBe('shell')
+    expect(classifyTool('pwsh', '')).toBe('shell')
+  })
+
+  it('команда про файлы → files, команда в сеть → web', () => {
+    expect(classifyTool('pwsh', 'cat src/app.ts')).toBe('files')
+    expect(classifyTool('bash', 'grep -r TODO .')).toBe('files')
+    expect(classifyTool('pwsh', 'curl https://api.x.com')).toBe('web')
+    expect(classifyTool('pwsh', 'git push')).toBe('web')
+    expect(classifyTool('pwsh', 'npm test')).toBe('shell')
+  })
+})
+
+describe('classifyTool: MCP-вызовы', () => {
+  it('браузерные серверы и browser_* тулки → browser', () => {
+    expect(classifyTool('mcp__playwright__browser_navigate')).toBe('browser')
+    expect(classifyTool('mcp__playwright__browser_tabs')).toBe('browser')
+    expect(classifyTool('mcp__playwright__browser_close')).toBe('browser')
+    expect(classifyTool('mcp__playwright__browser_network_requests')).toBe('browser')
+    expect(classifyTool('mcp__chrome-devtools__click')).toBe('browser')
+    expect(classifyTool('mcp__whatever__browser_screenshot')).toBe('browser')
+  })
+
+  it('agent_bus разносится по имени тулки', () => {
+    expect(classifyTool('mcp__agent_bus__browse')).toBe('web')
+    expect(classifyTool('mcp__agent_bus__history')).toBe('memory')
+    expect(classifyTool('mcp__agent_bus__agents_list')).toBe('agents')
+    expect(classifyTool('mcp__agent_bus__ask')).toBe('agents')
+    expect(classifyTool('mcp__agent_bus__ask_parallel')).toBe('agents')
+    expect(classifyTool('mcp__agent_bus__panel')).toBe('agents')
+    expect(classifyTool('mcp__agent_bus__ask_model')).toBe('agents')
+    // незнакомая тулка неизвестного сервера уходит в общее правило MCP
+    expect(classifyTool('mcp__agent_bus__unknown_tool')).toBe('web')
+  })
+
+  it('любой другой MCP → web', () => {
+    expect(classifyTool('mcp__exa__web_search')).toBe('web')
+    expect(classifyTool('mcp__github__list_issues')).toBe('web')
+    expect(classifyTool('mcp__server')).toBe('web')
+  })
+})
+
+describe('classifyTool: эвристики для незнакомых имён', () => {
+  it('старые имена файловых и веб-инструментов', () => {
+    expect(classifyTool('read_file')).toBe('files')
+    expect(classifyTool('write_file')).toBe('files')
+    expect(classifyTool('search_files')).toBe('files')
+    expect(classifyTool('list_dir')).toBe('files')
+    expect(classifyTool('web_fetch')).toBe('web')
+    expect(classifyTool('web_search')).toBe('web')
+  })
+
+  it('узкие станции проверяются раньше широких', () => {
+    expect(classifyTool('memory_search')).toBe('memory')
+    expect(classifyTool('browser_navigate')).toBe('browser')
+    expect(classifyTool('some_hook')).toBe('hooks')
+    expect(classifyTool('ask_approval')).toBe('hooks')
+    expect(classifyTool('spawn_agent')).toBe('agents')
+    expect(classifyTool('tool_search')).toBe('skills')
+    expect(classifyTool('todo_clear')).toBe('you')
+    expect(classifyTool('switch_model')).toBe('model')
+    expect(classifyTool('bash')).toBe('shell')
+  })
+})
+
+describe('classifyTool: fail-open', () => {
+  it('пустое имя и мусор → shell, без исключения', () => {
+    expect(classifyTool('')).toBe('shell')
+    expect(classifyTool('   ')).toBe('shell')
+    expect(classifyTool('mystery_thing')).toBe('shell')
+    expect(classifyTool('?!?><')).toBe('shell')
+  })
+
+  it('все возвращаемые значения — станции из схемы', () => {
+    const allowed: Station[] = [
+      'you', 'model', 'memory', 'files', 'shell', 'web', 'browser', 'agents', 'skills', 'hooks',
+    ]
+    const names = [
+      ...DSH_CASES.map(([n]) => n),
+      'read_file', 'web_search', 'mcp__x__y', 'todo_write', 'zzz', '',
+    ]
+    for (const n of names) expect(allowed).toContain(classifyTool(n))
   })
 })
