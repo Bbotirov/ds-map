@@ -103,7 +103,9 @@ function launchElectron(harnessPids: number[]): void {
   for (const pid of harnessPids) electronArgs.push(`--harness-pid=${pid}`)
   if (process.env.DSMAP_TITLE) electronArgs.push(`--harness-title=${process.env.DSMAP_TITLE}`)
   electronProc = spawn(electronPath, electronArgs, {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // stdin — не для ввода, а для сигнала: когда этот процесс умирает даже
+    // от taskkill /F, pipe закрывается, и панель видит EOF и гаснется сама.
+    stdio: ['pipe', 'pipe', 'pipe'],
     // Owner-PID нужен панели и её наблюдателю: если этот процесс убили через
     // диспетчер задач (на Windows сигнал обработчик не доходит), окно всё равно
     // должно закрыться само и не остаться сиротой.

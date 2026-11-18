@@ -107,7 +107,7 @@ async function start() {
   } else {
     console.log('[ds-map] PID харнеса неизвестен — панель у правого края экрана')
   }
-  watchOwner()
+  watchLauncher()
 
   panel.on('closed', () => {
     panel = null
@@ -130,22 +130,17 @@ async function start() {
 }
 
 /**
- * На Windows лаунчер, снятый диспетчером задач или `taskkill`, не оставляет
- * панели шанса отработать обработчик выхода. Поэтому панель сама следит за
- * родителем: умер владелец — закрываемся, чтобы не висеть сиротой.
+ * Сигнал «лаунчера больше нет» — закрытие stdin pipe. Опрос PID для этого не
+ * годится: на Windows `kill(pid, 0)` успешен и у мёртвого процесса, потому что
+ * мы, его дети, держим его handle. Pipe OS закрывает сам, даже при taskkill /F.
  */
-function watchOwner(): void {
-  const owner = Number.parseInt(process.env.DSMAP_OWNER_PID ?? '', 10)
-  if (!Number.isInteger(owner) || owner <= 0 || owner === process.pid || !panel) return
-  const timer = setInterval(() => {
-    try {
-      process.kill(owner, 0)
-    } catch {
-      console.log('[ds-map] лаунчер завершился — панель закрывается')
-      app.quit()
-    }
-  }, 2_000)
-  panel.once('closed', () => clearInterval(timer))
+function watchLauncher(): void {
+  if (!process.env.DSMAP_OWNER_PID) return
+  process.stdin.resume()
+  process.stdin.once('end', () => {
+    console.log('[ds-map] лаунчер завершился — панель закрывается')
+    app.quit()
+  })
 }
 
 function startWatching(pids: number[]): void {  watcher = new WindowWatcher({

@@ -58,9 +58,15 @@ $script:rb = New-Object System.Text.StringBuilder 512
 
 # Панель — наш родитель. Если Electron убит снаружи, наблюдатель уходит сам:
 # иначе powershell переживёт панель и останется крутиться сиротой.
+# HasExited, а не Get-Process: мы дети родителя и держим его handle, поэтому
+# «процесс найден» ничего не говорит — найден он бывает уже мёртвым.
 [int]$script:ownerPid = 0
 if ($env:DSMAP_OWNER_PID) { [Void][int]::TryParse($env:DSMAP_OWNER_PID, [ref]$script:ownerPid) }
-$ownerGone = { $script:ownerPid -gt 0 -and -not (Get-Process -Id $script:ownerPid -ErrorAction SilentlyContinue) }
+$ownerGone = {
+  if ($script:ownerPid -le 0) { return $false }
+  try { return [System.Diagnostics.Process]::GetProcessById($script:ownerPid).HasExited }
+  catch { return $true }
+}
 
 $filter = [DsMapWinApi+EnumWindowsProc] {
   param($hWnd, $lParam)
