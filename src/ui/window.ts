@@ -1,11 +1,19 @@
 /**
- * Поиск окна харнеса по PID и пристегивание панели справа.
- * Реализация для Windows (через PowerShell + user32.dll).
- * Fallback: правый край экрана, если окно не найдено.
+ * Пристыковка панели к окну харнеса (§10).
+ *
+ * Геометрию читает один долгоживущий PowerShell-процесс (`window-watcher.ps1`),
+ * который печатает NDJSON при смене состояния. Прежняя схема — `execSync` со
+ * свежим `Add-Type` каждые 500 мс — жгла CPU на компиляции и давала только
+ * «есть окно / нет окна», без «свёрнуто».
+ *
+ * Координаты из `GetWindowRect` powershell.exe уже приводит к 96-TPI DIP
+ * (проверено на экране 1920×1080 при 125%: физическое окно 1440×740 приходит
+ * как 1152×592), поэтому делить на `scaleFactor` здесь не нужно.
  */
 
-import * as child_process from 'node:child_process'
-import * as os from 'node:os'
+import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import type { Readable } from 'node:stream'
 
 export interface WindowBounds {
   x: number
@@ -14,87 +22,144 @@ export interface WindowBounds {
   height: number
 }
 
-export function findWindowByPid(pid: number): WindowBounds | null {
-  if (os.platform() !== 'win32') return null
+export type WatcherState =
+  | { kind: 'bounds'; bounds: WindowBounds }
+  | { kind: 'minimized' }
+  | { kind: 'pending' }
+  | { kind: 'gone' }
 
+/** Строка наблюдателя → состояние. Мусор и предупреждения PS → `null`, а не исключение. */
+export function parseWatcherLine(line: string): WatcherState | null {
+  const text = line.trim()
+  if (!text.startsWith('{')) return null
+  let raw: unknown
   try {
-    const psCmd = `
-      Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win {
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
-  [DllImport("user32.dll")] public static extern bool GetWindowThreadProcessId(IntPtr hwnd, out uint lpdwProcessId);
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
-  public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lp);
-  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-  public static void Main() { }
-}
-"@
-$windows = [System.Collections.ArrayList]::new()
-[Win]::EnumWindows((hwnd, lp) => {
-  uint pid;
-  [Win]::GetWindowThreadProcessId(hwnd, [ref] pid);
-  if (pid -eq ${pid}) {
-    $rect = New-Object Win+RECT
-    [Win]::GetWindowRect(hwnd, [ref] $rect)
-    $windows.Add([PSCustomObject]@{ X=$rect.Left; Y=$rect.Top; Width=$rect.Right-$rect.Left; Height=$rect.Bottom-$rect.Top })
-  }
-  return $true
-}, [IntPtr]::Zero)
-$windows | ConvertTo-Json
-    `
-    const result = child_process.execSync(
-      `powershell -NoProfile -Command "${psCmd}"`,
-      { encoding: 'utf8', maxBuffer: 1024 * 1024 }
-    )
-    const parsed = JSON.parse(result.trim())
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      const w = parsed[0]
-      return { x: w.X, y: w.Y, width: w.Width, height: w.Height }
-    }
+    raw = JSON.parse(text)
   } catch {
-    // окно не найдено — возвращаем null
+    return null
   }
-  return null
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  switch (o.state) {
+    case 'bounds': {
+      const n = [o.x, o.y, o.width, o.height]
+      if (!n.every((v) => typeof v === 'number' && Number.isFinite(v))) return null
+      return { kind: 'bounds', bounds: { x: o.x as number, y: o.y as number, width: o.width as number, height: o.height as number } }
+    }
+    case 'minimized':
+      return { kind: 'minimized' }
+    case 'pending':
+      return { kind: 'pending' }
+    case 'gone':
+      return { kind: 'gone' }
+    default:
+      return null
+  }
 }
 
+export interface WatcherOptions {
+  pids: number[]
+  scriptPath: string
+  /** Дополнительный признак — подстрока заголовка. Нужен, когда UI харнеса живёт в браузере. */
+  title?: string
+  intervalMs?: number
+}
+
+/** События: `state` (WatcherState), `exit` (код). Упавший наблюдатель не должен ронять панель. */
+export class WindowWatcher extends EventEmitter {
+  private child: ChildProcessByStdio<null, Readable, Readable> | null = null
+  private buffer = ''
+
+  constructor(private readonly opts: WatcherOptions) {
+    super()
+  }
+
+  get running(): boolean {
+    return this.child !== null
+  }
+
+  start(): void {
+    if (this.child || process.platform !== 'win32' || this.opts.pids.length === 0) return
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', this.opts.scriptPath],
+      {
+        env: {
+          ...process.env,
+          DSMAP_PID_LIST: this.opts.pids.join(','),
+          ...(this.opts.title ? { DSMAP_TITLE: this.opts.title } : {}),
+          ...(this.opts.intervalMs ? { DSMAP_INTERVAL_MS: String(this.opts.intervalMs) } : {}),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      },
+    )
+    this.child = child
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      this.buffer += chunk
+      let nl = this.buffer.indexOf('\n')
+      while (nl >= 0) {
+        const line = this.buffer.slice(0, nl)
+        this.buffer = this.buffer.slice(nl + 1)
+        const state = parseWatcherLine(line)
+        if (state) this.emit('state', state)
+        nl = this.buffer.indexOf('\n')
+      }
+    })
+    child.stderr.resume()
+    child.on('error', () => this.emit('exit', null))
+    child.on('close', (code) => {
+      if (this.child === child) this.child = null
+      this.emit('exit', code)
+    })
+  }
+
+  stop(): void {
+    const child = this.child
+    this.child = null
+    this.buffer = ''
+    child?.kill()
+  }
+}
+
+const PANEL_W = 420
+const PANEL_MIN_W = 320
+const GAP = 8
+const PANEL_MIN_H = 200
+
+/**
+ * Прямоугольник панели справа от окна харнеса. `area` — рабочая область монитора
+ * (без таскбара): иначе панель уезжает под панель задач.
+ * Когда места справа нет — вжимаемся в правый край, перекрывая край харнеса.
+ */
 export function computePanelBounds(
   harness: WindowBounds | null,
-  screenWidth: number,
-  screenHeight: number
+  area: { x: number; y: number; width: number; height: number },
 ): { x: number; y: number; width: number; height: number } {
-  const DEFAULT_W = 420
-  const MIN_W = 320
-  const MAX_W = 560
-  const GAP = 8
+  const right = area.x + area.width
+  const bottom = area.y + area.height
 
-  let x: number, y: number, h: number, w: number
-
-  if (harness) {
-    x = harness.x + harness.width + GAP
-    y = harness.y
-    h = harness.height
-    w = Math.min(MAX_W, Math.max(MIN_W, DEFAULT_W))
-  } else {
-    x = screenWidth - DEFAULT_W - GAP
-    y = GAP
-    h = screenHeight - GAP * 2
-    w = DEFAULT_W
+  if (!harness) {
+    return { x: right - PANEL_W - GAP, y: area.y + GAP, width: PANEL_W, height: area.height - GAP * 2 }
   }
 
-  // Прижать к правому краю если вылезает
-  if (x + w > screenWidth) {
-    w = Math.max(MIN_W, screenWidth - x - GAP)
-    x = screenWidth - w - GAP
+  let x = harness.x + harness.width + GAP
+  let w = PANEL_W
+  if (x + w > right) {
+    w = Math.max(PANEL_MIN_W, right - x - GAP)
+    x = right - w - GAP
   }
-  if (x < 0) x = GAP
+  if (x < area.x) x = area.x + GAP
 
-  // Обрезать высоту если вылезает за низ
-  if (y + h > screenHeight) {
-    h = screenHeight - y - GAP
+  // Высоту берём как у харнеса, но панель не должна вылезать за рабочую область:
+  // если не влезает вниз — сдвигаем вверх, пока вся панель видна.
+  let y = Math.max(area.y, harness.y)
+  let h = Math.max(PANEL_MIN_H, harness.height)
+  if (y + h > bottom) {
+    y = Math.max(area.y, bottom - h)
+    h = bottom - y
   }
-  if (h < 200) h = 200
 
   return { x, y, width: w, height: h }
 }

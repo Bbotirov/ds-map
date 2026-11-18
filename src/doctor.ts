@@ -10,12 +10,12 @@ const TOKEN_PATH = path.join(process.env.HOME ?? process.env.USERPROFILE ?? '', 
 const PORT_PATH = path.join(process.env.HOME ?? process.env.USERPROFILE ?? '', '.dsh', 'dsmap-port.txt')
 const SESSIONS_ROOT = path.join(process.env.HOME ?? process.env.USERPROFILE ?? '', '.dsh', 'sessions')
 
-function check(name: string, ok: boolean, detail?: string): void {
-  console.log(`${ok ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`)
-}
-
 async function main() {
-  let ok = true
+  const failed: string[] = []
+  function check(name: string, passed: boolean, detail?: string): void {
+    console.log(`${passed ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`)
+    if (!passed) failed.push(name)
+  }
 
   // 1. Токен
   const tokenExists = fs.existsSync(TOKEN_PATH)
@@ -37,7 +37,7 @@ async function main() {
   const distExists = fs.existsSync(path.join(process.cwd(), 'dist'))
   check('Проект собран', distExists, 'запустите pnpm build')
 
-  if (!ok) process.exit(1)
+  if (failed.length > 0) process.exit(1)
 }
 
 main().catch((err) => {

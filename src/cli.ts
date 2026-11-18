@@ -65,15 +65,17 @@ async function main() {
   // 3. Запускаем хвост сессии (ищет последнюю сессию для cwd)
   tailer.start(cwd)
 
-  // 4. Запускаем哈рес
+  // 4. Запускаем харнес
+  // На Windows shell-скрипты (.ps1, .cmd) требуют shell:true.
+  // TUI нужен inherit stdio, иначе харнес не получит терминал.
+  const isWin = process.platform === 'win32'
+  const needsShell = isWin && !/\.exe$/i.test(harnessCmd)
   harnessProc = spawn(harnessCmd, harnessCmdArgs, {
     cwd,
     env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: 'inherit',
+    shell: needsShell,
   })
-
-  harnessProc.stdout?.on('data', (d) => process.stdout.write(d))
-  harnessProc.stderr?.on('data', (d) => process.stderr.write(d))
 
   harnessProc.on('exit', (code) => {
     console.log(`[ds-map] харнес завершён с кодом ${code}`)
@@ -81,8 +83,12 @@ async function main() {
   })
 
   // 5. Ждём появления порта и запускаем окно Electron
-  await new Promise((r) => setTimeout(r, 1500)) // даём сайдкару время запуститься
-  launchElectron(port, server.getToken()!, harnessProc.pid)
+  await new Promise((r) => setTimeout(r, 1_500))
+  // У `dsh` в терминале своего окна нет, поэтому пристёгиваемся к терминалу.
+  // PID харнеса добавляем на случай GUI-профиля (web/acp) и .cmd-обёрток:
+  // наблюдатель сам расширяет список потомками.
+  const pids = [process.ppid, harnessProc.pid].filter((p): p is number => typeof p === 'number' && p > 0)
+  launchElectron(port, server.getToken()!, pids)
 
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
@@ -93,10 +99,10 @@ function runDoctor(): void {
   const PORT_PATH = path.join(os.homedir(), '.dsh', 'dsmap-port.txt')
   const SESSIONS_ROOT = path.join(os.homedir(), '.dsh', 'sessions')
 
-  let ok = true
+  const failed: string[] = []
   function check(name: string, passed: boolean, detail?: string): void {
     console.log(`${passed ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`)
-    if (!passed) ok = false
+    if (!passed) failed.push(name)
   }
 
   check('Токен сайдкара', fs.existsSync(TOKEN_PATH), TOKEN_PATH)
@@ -105,15 +111,16 @@ function runDoctor(): void {
   check('Зависимости установлены', fs.existsSync(path.join(process.cwd(), 'node_modules')))
   check('Проект собран', fs.existsSync(path.join(process.cwd(), 'dist')), 'запустите pnpm build')
 
-  if (!ok) process.exit(1)
+  if (failed.length > 0) process.exit(1)
 }
 
-function launchElectron(port: number, token: string, harnessPid?: number): void {
+function launchElectron(port: number, token: string, harnessPids: number[]): void {
   const electronDir = path.dirname(require.resolve('electron'))
   const electronPath = path.join(electronDir, 'dist', 'electron.exe')
   const mainPath = path.join(__dirname, 'ui', 'main.js')
   const electronArgs = [mainPath, `--port=${port}`, `--token=${token}`]
-  if (harnessPid) electronArgs.push(`--harness-pid=${harnessPid}`)
+  for (const pid of harnessPids) electronArgs.push(`--harness-pid=${pid}`)
+  if (process.env.DSMAP_TITLE) electronArgs.push(`--harness-title=${process.env.DSMAP_TITLE}`)
   electronProc = spawn(electronPath, electronArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: process.env,
@@ -124,11 +131,11 @@ function launchElectron(port: number, token: string, harnessPid?: number): void 
 
 function shutdown(): void {
   if (harnessProc) {
-    try { harnessProc.kill('SIGTERM') } catch {}
+    try { harnessProc.kill('SIGTERM') } catch { /* ignored */ }
     harnessProc = null
   }
   if (electronProc) {
-    try { electronProc.kill('SIGTERM') } catch {}
+    try { electronProc.kill('SIGTERM') } catch { /* ignored */ }
     electronProc = null
   }
   tailer.stop()

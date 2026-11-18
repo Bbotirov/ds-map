@@ -1,9 +1,8 @@
 node_modules/
 dist/
-.env
-*.log
-.DS_Store
 coverage/
-.vite/
-.cache/
+*.log
+.env
+.dsmap-config.json
+# Данные сессий DeepSeek Harness — никогда не коммитить (§12)
 .dsh/
