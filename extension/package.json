@@ -3,7 +3,7 @@
   "publisher": "bbotirov",
   "displayName": "ds-map — DeepSeek Harness radar",
   "description": "A radar panel beside your agent chat: stations, route, errors and a real context ring. Event names only — never content.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -16,6 +16,7 @@
   "keywords": ["deepseek", "harness", "dsh", "agent", "radar", "privacy", "visualization"],
   "icon": "images/icon.png",
   "main": "./out/extension.js",
+  "activationEvents": ["onStartupFinished"],
   "dependencies": {
     "ws": "^8.17.0"
   },
@@ -128,8 +129,8 @@
         },
         "dsMap.harnessCommand": {
           "type": "string",
-          "default": "dsh",
-          "description": "Harness command passed after `dsmap run --`. For example: dsh --profile web"
+          "default": "dsh --profile web",
+          "description": "Harness command passed after `dsmap run --`. `dsh` needs a profile: use `dsh --profile web` for a long session or `dsh --profile headless \"task\"` for a single turn."
         },
         "dsMap.autoOpen": {
           "type": "boolean",
