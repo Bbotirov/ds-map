@@ -60,7 +60,9 @@ export function safe<T>(fn: () => T, fallback: T): T {
   try {
     return fn()
   } catch (err) {
-    console.error('[ds-map] mapper failed', err instanceof Error ? err.message : 'unknown')
+    // Только имя класса: в `message` Node охотно печатает кусок входа — URL,
+    // фрагмент JSON, аргумент команды. В лог он попасть не должен (§12.6).
+    console.error('[ds-map] mapper failed:', err instanceof Error ? err.name : 'unknown')
     return fallback
   }
 }

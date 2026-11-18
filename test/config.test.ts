@@ -72,6 +72,12 @@ describe('файл настроек', () => {
     expect(readConfig()).toEqual({ theme: 'light', lang: 'en', motion: 'reduced' })
   })
 
+  it('BOM от PowerShell не ломает настройки', () => {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true })
+    fs.writeFileSync(configPath(), '\uFEFF{"theme":"light","lang":"en","motion":"reduced"}')
+    expect(readConfig()).toEqual({ theme: 'light', lang: 'en', motion: 'reduced' })
+  })
+
   it('битый JSON и несуществующий файл — дефолты, без исключения', () => {
     fs.mkdirSync(path.dirname(configPath()), { recursive: true })
     fs.writeFileSync(configPath(), '{ не json')

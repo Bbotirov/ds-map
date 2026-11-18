@@ -58,7 +58,9 @@ export function normalizeConfig(raw: unknown): DsMapConfig {
 
 export function readConfig(): DsMapConfig {
   try {
-    return normalizeConfig(JSON.parse(fs.readFileSync(configPath(), 'utf8')))
+    // BOM в начале ломает JSON.parse, а PowerShell 5.1 пишет его всегда.
+    const text = fs.readFileSync(configPath(), 'utf8').replace(/^\uFEFF/, '')
+    return normalizeConfig(JSON.parse(text))
   } catch {
     // Нет файла или битый JSON — дефолты, панель всё равно открывается.
     return { ...DEFAULT_CONFIG }

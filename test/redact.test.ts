@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { clean, fileLabel, urlLabel, commandLabel, safe } from '../src/core/redact.js'
 
 describe('clean', () => {
@@ -66,5 +66,16 @@ describe('safe', () => {
   })
   it('returns fallback on error', () => {
     expect(safe(() => { throw new Error('boom') }, 0)).toBe(0)
+  })
+  it('не печатает содержимое ошибки — только её имя (§12.6)', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    safe(() => {
+      throw new SyntaxError("Unexpected token in JSON at position 12: {\"content\":\"секретный промпт\"}")
+    }, 'unknown')
+    const logged = spy.mock.calls.map((call) => call.join(' ')).join('\n')
+    expect(logged).toContain('SyntaxError')
+    expect(logged).not.toContain('секретный')
+    expect(logged).not.toContain('content')
+    spy.mockRestore()
   })
 })

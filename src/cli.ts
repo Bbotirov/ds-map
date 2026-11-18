@@ -82,18 +82,22 @@ async function main() {
   })
 
   // 5. Ждём появления порта и запускаем окно Electron
+  // HWND собственной консоли: headless-харнес окна не имеет, якорь — терминал,
+  // а окно терминала принадлежит не нашему дереву процессов (conhost/Windows
+  // Terminal), поэтому PID-перебор его не находит.
+  const hwnd = consoleHwnd()
   await new Promise((r) => setTimeout(r, 1_500))
   // У `dsh` в терминале своего окна нет, поэтому пристёгиваемся к терминалу.
   // PID харнеса добавляем на случай GUI-профиля (web/acp) и .cmd-обёрток:
   // наблюдатель сам расширяет список потомками.
   const pids = [process.ppid, harnessProc.pid].filter((p): p is number => typeof p === 'number' && p > 0)
-  launchElectron(pids)
+  launchElectron(pids, hwnd)
 
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 }
 
-function launchElectron(harnessPids: number[]): void {
+function launchElectron(harnessPids: number[], anchorHwnd: number | null): void {
   const electronDir = path.dirname(require.resolve('electron'))
   const electronPath = path.join(electronDir, 'dist', 'electron.exe')
   const mainPath = path.join(__dirname, 'ui', 'main.js')
@@ -101,18 +105,39 @@ function launchElectron(harnessPids: number[]): void {
   // прочитал бы любой перечислитель процессов. Окно берёт их из файлов сайдкара.
   const electronArgs = [mainPath]
   for (const pid of harnessPids) electronArgs.push(`--harness-pid=${pid}`)
+  if (anchorHwnd) electronArgs.push(`--anchor-hwnd=${anchorHwnd}`)
   if (process.env.DSMAP_TITLE) electronArgs.push(`--harness-title=${process.env.DSMAP_TITLE}`)
   electronProc = spawn(electronPath, electronArgs, {
-    // stdin — не для ввода, а для сигнала: когда этот процесс умирает даже
-    // от taskkill /F, pipe закрывается, и панель видит EOF и гаснется сама.
-    stdio: ['pipe', 'pipe', 'pipe'],
-    // Owner-PID нужен панели и её наблюдателю: если этот процесс убили через
-    // диспетчер задач (на Windows сигнал обработчик не доходит), окно всё равно
-    // должно закрыться само и не остаться сиротой.
+    // stdin не нужен совсем: под Electron это GUI-подсистема, её stdin закрыт
+    // на старте, и любой сигнал «лаунчер пишет сюда» оказался ложным.
+    stdio: ['ignore', 'pipe', 'pipe'],
+    // Owner-PID — маркер режима (панель, запущенная лаунчером) и страховка для
+    // наблюдателя окон: если этот процесс убили через диспетчер задач, окно всё
+    // равно должно закрыться само и не остаться сиротой.
     env: { ...process.env, DSMAP_OWNER_PID: String(process.pid) },
   })
   electronProc.stdout?.on('data', (d) => process.stdout.write(d))
   electronProc.stderr?.on('data', (d) => process.stderr.write(d))
+}
+
+/**
+ * Хэндл окна той консоли, из которой запущен лаунчер. Ребёнок PowerShell
+ * наследует консоль родителя, поэтому `GetConsoleWindow()` из него возвращает
+ * именно окно терминала. 0 — консоли нет (запуск из GUI, службой, с отсоединённым
+ * терминалом): тогда якорь ищется по дереву процессов, как раньше.
+ */
+function consoleHwnd(): number | null {
+  if (process.platform !== 'win32') return null
+  const ps =
+    "Add-Type -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();' -Name Console -Namespace DsMap -PassThru | Out-Null; " +
+    '[long]([DsMap.Console]::GetConsoleWindow())'
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 5_000,
+  })
+  const n = Number.parseInt((r.stdout ?? '').trim(), 10)
+  return Number.isFinite(n) && n > 0 ? n : null
 }
 
 /** Гасит всё, что подняли. Повторный вызов безвреден. */

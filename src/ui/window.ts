@@ -60,6 +60,11 @@ export function parseWatcherLine(line: string): WatcherState | null {
 export interface WatcherOptions {
   pids: number[]
   scriptPath: string
+  /**
+   * Точный хэндл окна-якоря (консоль лаунчера). Надёжнее дерева PID: окно
+   * терминала принадлежит Windows Terminal/conhost, а не нашим процессам.
+   */
+  hwnd?: number
   /** Дополнительный признак — подстрока заголовка. Нужен, когда UI харнеса живёт в браузере. */
   title?: string
   intervalMs?: number
@@ -79,7 +84,9 @@ export class WindowWatcher extends EventEmitter {
   }
 
   start(): void {
-    if (this.child || process.platform !== 'win32' || this.opts.pids.length === 0) return
+    if (this.child || process.platform !== 'win32') return
+    const hwnd = this.opts.hwnd ?? 0
+    if (this.opts.pids.length === 0 && hwnd <= 0) return
     const child = spawn(
       'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', this.opts.scriptPath],
@@ -87,6 +94,7 @@ export class WindowWatcher extends EventEmitter {
         env: {
           ...process.env,
           DSMAP_PID_LIST: this.opts.pids.join(','),
+          ...(hwnd > 0 ? { DSMAP_HWND: String(hwnd) } : {}),
           // Наблюдатель обязан умереть вместе с панелью: если Electron убит
           // снаружи, его powershell иначе крутится вечно сиротой.
           DSMAP_OWNER_PID: String(process.pid),

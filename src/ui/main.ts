@@ -10,6 +10,7 @@ import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
 import { computePanelBounds, WindowWatcher, type WatcherState, type WindowBounds } from './window.js'
+import { probeSidecar, startLauncherWatch } from './launcher-watch.js'
 import { normalizeConfig, readConfig, readEndpoint, writeConfig, type DsMapConfig, type Endpoint } from '../shared/config.js'
 
 const { app, BrowserWindow, screen, ipcMain, Menu } = electron
@@ -23,6 +24,7 @@ let watcher: WindowWatcher | null = null
 let restartTimer: ReturnType<typeof setTimeout> | null = null
 let restarts = 0
 let lastBoundsKey = ''
+let stopLauncherWatch: (() => void) | null = null
 /** Panel скрыт, потому что свёрнуто окно харнеса — не трогать show/hide вручную. */
 let hiddenWithHarness = false
 let docked = false
@@ -38,6 +40,8 @@ const HARNESS_PIDS = process.argv
   .map((v) => parseInt(v, 10))
   .filter((v) => Number.isFinite(v) && v > 0)
 const HARNESS_TITLE = process.argv.find((a) => a.startsWith('--harness-title='))?.split('=')[1]
+/** Окно терминала, к которому пристёгиваться: его хэндл знает только лаунчер. */
+const ANCHOR_HWND = parseInt(process.argv.find((a) => a.startsWith('--anchor-hwnd='))?.split('=')[1] ?? '0', 10)
 
 const config: DsMapConfig = readConfig()
 
@@ -55,6 +59,11 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function start() {
+  // Читатель stdout/stderr панели — процесс лаунчера. Когда лаунчер убит, pipe
+  // рвётся, Node бросает EPIPE из console.log, и без обработчика панель падает
+  // в тот же миг — раньше, чем успевает сама решить, что лаунчер умер.
+  process.stdout?.on('error', () => undefined)
+  process.stderr?.on('error', () => undefined)
   // Родное меню Electron (File/Edit/View…) съедает 25 px и не несёт ничего
   // полезного: в панели всё управление уже есть в тулбаре.
   Menu.setApplicationMenu(null)
@@ -102,10 +111,11 @@ async function start() {
   // Кандидаты на окно-якорь приходят из cli.ts: терминал и сам харнес.
   // Свой ppid сюда не добавляем: у dsmap-процесса окна нет, а его дерево
   // может затянуть в список любое соседнее приложение, запустившее Electron.
-  if (HARNESS_PIDS.length > 0) {
-    startWatching([...new Set(HARNESS_PIDS)])
+  const anchorHwnd = Number.isFinite(ANCHOR_HWND) ? ANCHOR_HWND : 0
+  if (HARNESS_PIDS.length > 0 || anchorHwnd > 0) {
+    startWatching([...new Set(HARNESS_PIDS)], anchorHwnd)
   } else {
-    console.log('[ds-map] PID харнеса неизвестен — панель у правого края экрана')
+    console.log('[ds-map] якоря нет (ни PID харнеса, ни окна консоли) — панель у правого края экрана')
   }
   watchLauncher()
 
@@ -115,9 +125,9 @@ async function start() {
     watcher = null
   })
 
-
   app.on('window-all-closed', () => {
     watcher?.stop()
+    stopLauncherWatch?.()
     ws?.close()
     app.quit()
   })
@@ -125,27 +135,37 @@ async function start() {
   app.on('before-quit', () => {
     if (restartTimer) clearTimeout(restartTimer)
     watcher?.stop()
+    stopLauncherWatch?.()
     ws?.close()
   })
 }
 
 /**
- * Сигнал «лаунчера больше нет» — закрытие stdin pipe. Опрос PID для этого не
- * годится: на Windows `kill(pid, 0)` успешен и у мёртвого процесса, потому что
- * мы, его дети, держим его handle. Pipe OS закрывает сам, даже при taskkill /F.
+ * Сигнал «лаунчера больше нет» — молчание порта его сайдкара. Сам лаунчер
+ * передаёт свой PID только как признак режима: опрос PID и EOF на stdin на
+ * Windows оба врут (подробности в `launcher-watch.ts`).
  */
 function watchLauncher(): void {
   if (!process.env.DSMAP_OWNER_PID) return
-  process.stdin.resume()
-  process.stdin.once('end', () => {
-    console.log('[ds-map] лаунчер завершился — панель закрывается')
-    app.quit()
+  stopLauncherWatch = startLauncherWatch({
+    endpoint: resolveEndpoint,
+    probe: probeSidecar,
+    onGone: (reason) => {
+      console.log(
+        reason === 'endpoint-gone'
+          ? '[ds-map] лаунчер завершился — панель закрывается'
+          : '[ds-map] сайдкар не отвечает — панель закрывается',
+      )
+      app.quit()
+    },
   })
 }
 
-function startWatching(pids: number[]): void {  watcher = new WindowWatcher({
+function startWatching(pids: number[], hwnd: number): void {
+  watcher = new WindowWatcher({
     pids,
     scriptPath: path.join(HERE, 'window-watcher.ps1'),
+    ...(hwnd > 0 ? { hwnd } : {}),
     ...(HARNESS_TITLE ? { title: HARNESS_TITLE } : {}),
     intervalMs: 400,
   })
@@ -155,7 +175,7 @@ function startWatching(pids: number[]): void {  watcher = new WindowWatcher({
     if (restarts >= 2) return
     restarts++
     if (restartTimer) clearTimeout(restartTimer)
-    restartTimer = setTimeout(() => startWatching(pids), 2_000)
+    restartTimer = setTimeout(() => startWatching(pids, hwnd), 2_000)
   })
   watcher.start()
 }
